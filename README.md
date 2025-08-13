@@ -1,5 +1,7 @@
 # AgentlyFormat v2.0.0 – 面向 AI JSON 处理的全能工具箱
 
+> 开发说明：本项目完全使用vibe coding开发，0人工编程，从0到2.0版本（包含debug、测试集的构建以及测试）仅花费了约12小时，项目总计约15000行代码。
+
 - 🧠 **智能 JSON 补全**：双阶段词法/语法修复，引入 RepairTrace 与置信度评估，3 种策略（Smart / Conservative / Aggressive）适应不同场景。
 - 🌊 **流式 JSON 解析**：环形缓冲 + 智能边界检测，支持大文件及分块数据实时解析，事件驱动输出进度与增量结果。
 - 🛣️ **数据路径构建**：点号、斜杠、括号多格式互转，快速提取/访问深层值，内置缓存加速重复查询。
@@ -21,7 +23,7 @@
 ## 🎉 v2.0.0 重大更新
 
 **🚀 性能飞跃**: 适配器创建速度提升81% (19.5s → 3.75s)  
-**✅ 稳定性**: 141个测试用例100%通过  
+**✅ 稳定性**: 156个测试用例100%通过  
 **🔧 架构重构**: 全新的流式解析和补全引擎  
 **🌐 API增强**: 完整的REST API和WebSocket支持  
 **📊 实时监控**: 新增统计接口和健康检查  
@@ -414,8 +416,8 @@ asyncio.run(websocket_client())
 ## 🔗 链接
 
 - **GitHub**: https://github.com/ailijian/AgentlyFormat
-- **文档**: https://AgentlyFormat.readthedocs.io
-- **PyPI**: https://pypi.org/project/AgentlyFormat
+- **文档**: https://github.com/ailijian/AgentlyFormat/blob/main/docs/AgentlyFormat%E5%8A%9F%E8%83%BD%E4%BB%8B%E7%BB%8D%E4%B8%8E%E4%BD%BF%E7%94%A8%E6%8C%87%E5%AF%BC%E6%89%8B%E5%86%8C.md
+- **PyPI**: 暂无
 - **问题反馈**: https://github.com/ailijian/AgentlyFormat/issues
 - **更新日志**: [CHANGELOG](CHANGELOG/)
 - **迁移指南**: [MIGRATION.md](docs/MIGRATION.md)
@@ -424,7 +426,7 @@ asyncio.run(websocket_client())
 
 ## 🙏 致谢
 
-- [Agently](https://github.com/AgentEra/Agently) - 强大的agent通用框架，本项目主要基于Agently强大的格式化输出能力构建，主打轻量化
+- [Agently](https://github.com/AgentEra/Agently) - 强大的agent通用框架，本项目主要基于Agently强大的格式化输出能力构建，主打轻量化和高性能
 - [FastAPI](https://fastapi.tiangolo.com/) - 现代化的Web框架
 - [Pydantic](https://pydantic-docs.helpmanual.io/) - 数据验证库
 - [asyncio](https://docs.python.org/3/library/asyncio.html) - 异步编程支持
