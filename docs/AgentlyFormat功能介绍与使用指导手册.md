@@ -2028,9 +2028,9 @@ class ProductionSettings(Settings):
 
 ### 获取帮助
 
-- **GitHub Issues**: [https://github.com/AgentEra/AgentlyFormat/issues](https://github.com/AgentEra/AgentlyFormat/issues)
-- **文档**: [https://AgentlyFormat.readthedocs.io](https://AgentlyFormat.readthedocs.io)
-- **邮箱支持**: support@agently.tech
+- **GitHub Issues**: [https://github.com/ailijian/AgentlyFormat/issues](https://github.com/ailijian/AgentlyFormat/issues)
+- **文档**: [https://ailijian.github.io/AgentlyFormat/](https://ailijian.github.io/AgentlyFormat/)
+- **邮箱支持**: yeyubie@gmail.com
 
 ### 贡献指南
 
@@ -2044,7 +2044,7 @@ class ProductionSettings(Settings):
 
 - **v2.1.0**: 更多模型支持、插件系统
 - **v2.2.0**: Web管理界面、集群支持
-- **v3.0.0**: 机器学习集成、多语言支持
+- **v3.0.0**: 未知
 
 ---
 
@@ -2056,4 +2056,6 @@ class ProductionSettings(Settings):
 
 **AgentlyFormat** - 让大模型JSON输出更稳定、更可靠！ 🚀
 
-*最后更新: 2024年12月*
+*最后更新日期：2025年8月13日*
+
+**版本：2.0.0**
