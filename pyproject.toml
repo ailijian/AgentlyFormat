@@ -7,7 +7,7 @@ name = "AgentlyFormat"
 version = "2.0.0"
 description = "专注于大模型格式化输出结果的Python库，提供稳定可靠的JSON格式化解析能力 - v2.0.0重大更新：性能提升81%，架构全面重构"
 authors = [
-    {name = "AgentEra", email = "support@agently.tech"}
+    {name = "ailijian", email = "yeyubie@gmail.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.8"
@@ -24,7 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Text Processing :: Markup :: JSON",
+    "Topic :: Text Processing :: Markup",
     "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
 ]
 keywords = ["llm", "json", "streaming", "parser", "ai", "format", "websocket", "real-time", "performance", "schema-validation"]

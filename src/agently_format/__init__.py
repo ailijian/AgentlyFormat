@@ -11,9 +11,9 @@ from .types.events import StreamingEvent, EventType
 from .types.models import ModelConfig, ParseRequest, ParseResponse
 from .types.schemas import JSONSchema
 
-__version__ = "0.1.0"
-__author__ = "AgentEra"
-__email__ = "support@agently.tech"
+__version__ = "2.0.0"
+__author__ = "ailijian"
+__email__ = "yeyubie@gmail.com"
 
 __all__ = [
     "StreamingParser",

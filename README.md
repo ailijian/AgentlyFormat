@@ -417,7 +417,7 @@ asyncio.run(websocket_client())
 
 - **GitHub**: https://github.com/ailijian/AgentlyFormat
 - **文档**: https://github.com/ailijian/AgentlyFormat/blob/main/docs/AgentlyFormat%E5%8A%9F%E8%83%BD%E4%BB%8B%E7%BB%8D%E4%B8%8E%E4%BD%BF%E7%94%A8%E6%8C%87%E5%AF%BC%E6%89%8B%E5%86%8C.md
-- **PyPI**: 暂无
+- **PyPI**: https://pypi.org/project/AgentlyFormat/2.0.0/
 - **问题反馈**: https://github.com/ailijian/AgentlyFormat/issues
 - **更新日志**: [CHANGELOG](CHANGELOG/)
 - **迁移指南**: [MIGRATION.md](docs/MIGRATION.md)
