@@ -66,7 +66,7 @@ class WenxinAdapter(BaseModelAdapter):
         params = {
             "grant_type": "client_credentials",
             "client_id": self.config.api_key,
-            "client_secret": getattr(self.config, 'secret_key', '')
+            "client_secret": getattr(self.config, 'api_secret', '')
         }
         
         response = await self.client.post(token_url, params=params)

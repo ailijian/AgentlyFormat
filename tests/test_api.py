@@ -375,7 +375,7 @@ class TestModelConfig:
         }
         
         request_data = {
-            "model_type": "openai",
+            "model_type": ModelType.OPENAI.value,
             "model_name": "gpt-3.5-turbo",
             "api_key": "test-api-key",
             "base_url": "https://api.openai.com/v1",
@@ -402,7 +402,7 @@ class TestModelConfig:
         }
         
         request_data = {
-            "model_type": "openai",
+            "model_type": ModelType.OPENAI.value,
             "model_name": "gpt-3.5-turbo",
             "api_key": "invalid-key",
             "base_url": "https://api.openai.com/v1"
@@ -439,7 +439,7 @@ class TestChat:
                 }
             ],
             "model_config": {
-                "model_type": "openai",
+                "model_type": ModelType.OPENAI.value,
                 "model_name": "gpt-3.5-turbo",
                 "api_key": "test-key"
             },
@@ -447,6 +447,11 @@ class TestChat:
         }
         
         response = client.post("/api/v1/chat", json=request_data)
+        
+        # 调试信息
+        if response.status_code != 200:
+            print(f"Response status: {response.status_code}")
+            print(f"Response content: {response.text}")
         
         assert response.status_code == 200
         data = response.json()

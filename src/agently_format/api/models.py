@@ -216,7 +216,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     """聊天请求"""
     messages: List[ChatMessage] = Field(description="消息列表")
-    model_config_data: Optional[ModelConfigRequest] = Field(None, description="模型配置")
+    model_config_data: Optional[ModelConfigRequest] = Field(None, description="模型配置", alias="model_config")
     config_id: Optional[str] = Field(None, description="配置ID")
     stream: bool = Field(False, description="是否流式返回")
     expected_format: Optional[str] = Field(None, description="期望的返回格式")
@@ -251,18 +251,18 @@ class ChatResponse(BaseResponse):
 
 
 # 健康检查相关
-class HealthCheckResponse(BaseModel):
+class HealthCheckResponse(BaseResponse):
     """健康检查响应"""
-    status: str = Field("healthy", description="健康状态")
+    status: StatusEnum = StatusEnum.SUCCESS
     version: str = Field(description="版本号")
-    timestamp: datetime = Field(default_factory=datetime.now, description="时间戳")
     uptime: float = Field(description="运行时间（秒）")
     dependencies: Dict[str, str] = Field(description="依赖状态")
 
 
 # 统计信息相关
-class StatsResponse(BaseModel):
+class StatsResponse(BaseResponse):
     """统计信息响应"""
+    status: StatusEnum = StatusEnum.SUCCESS
     total_requests: int = Field(description="总请求数")
     active_sessions: int = Field(description="活跃会话数")
     total_events: int = Field(description="总事件数")

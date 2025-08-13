@@ -7,7 +7,7 @@ import pytest
 import json
 import asyncio
 from typing import Dict, Any, AsyncGenerator
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, Mock
 
 import httpx
 
@@ -36,8 +36,14 @@ class TestBaseModelAdapter:
         adapter = OpenAIAdapter(config)
         
         assert adapter.config == config
-        assert adapter.client is not None
         assert adapter.model_name == "gpt-3.5-turbo"
+        assert adapter.api_key == "test-key"
+        # 客户端延迟初始化，初始为None
+        assert adapter.client is None
+        
+        # 调用_setup_client后应该不为None
+        adapter._setup_client()
+        assert adapter.client is not None
     
     @pytest.mark.asyncio
     async def test_adapter_close(self):
@@ -49,6 +55,7 @@ class TestBaseModelAdapter:
         )
         
         adapter = OpenAIAdapter(config)
+        adapter._setup_client()  # 确保客户端已初始化
         
         # 关闭适配器
         await adapter.close()
@@ -93,7 +100,7 @@ class TestOpenAIAdapter:
         
         assert payload["model"] == "gpt-3.5-turbo"
         assert payload["messages"] == messages
-        assert payload["stream"] is False
+        assert "stream" not in payload  # stream=False时不包含stream字段
         assert "temperature" in payload
         assert "max_tokens" in payload
     
@@ -115,7 +122,8 @@ class TestOpenAIAdapter:
         assert response.finish_reason == "stop"
         assert response.usage["total_tokens"] == 18
     
-    def test_parse_stream_chunk(self, mock_stream_chunks):
+    @pytest.mark.asyncio
+    async def test_parse_stream_chunk(self, mock_stream_chunks):
         """测试解析流式响应块"""
         config = create_model_config(
             model_type=ModelType.OPENAI,
@@ -127,7 +135,7 @@ class TestOpenAIAdapter:
         
         chunks = []
         for chunk_data in mock_stream_chunks[:-1]:  # 排除 [DONE]
-            chunk = adapter._parse_stream_chunk(chunk_data)
+            chunk = await adapter._parse_stream_chunk(chunk_data)
             if chunk:
                 chunks.append(chunk)
         
@@ -268,7 +276,8 @@ class TestOpenAIAdapter:
             mock_stream_request.return_value = mock_stream()
             
             chunks = []
-            async for chunk in adapter.chat_completion(messages, stream=True):
+            stream_generator = adapter.chat_completion(messages, stream=True)
+            async for chunk in stream_generator:
                 chunks.append(chunk)
             
             assert len(chunks) > 0
@@ -415,22 +424,52 @@ class TestModelAdapterFactory:
     
     def test_register_adapter(self):
         """测试注册适配器"""
-        # 创建自定义适配器类
-        class TestAdapter(BaseModelAdapter):
-            async def chat_completion(self, messages, **kwargs):
-                return ModelResponse(
-                    content="test response",
-                    model=self.model_name,
-                    usage={},
-                    finish_reason="stop"
-                )
+        # 保存原来的适配器
+        original_adapter = ModelAdapter._adapters.get(ModelType.CUSTOM)
         
-        # 注册适配器
-        ModelAdapter.register_adapter("test_model", TestAdapter)
-        
-        # 验证注册成功
-        supported_models = ModelAdapter.get_supported_models()
-        assert "test_model" in supported_models
+        try:
+            # 创建自定义适配器类
+            class TestAdapter(BaseModelAdapter):
+                async def chat_completion(self, messages, **kwargs):
+                    return ModelResponse(
+                        content="test response",
+                        model=self.model_name,
+                        usage={},
+                        finish_reason="stop"
+                    )
+                
+                def _build_request_payload(self, messages, **kwargs):
+                    return {"messages": messages, "model": self.model_name}
+                
+                def _parse_response(self, response_data):
+                    return ModelResponse(
+                        content="test response",
+                        model=self.model_name,
+                        usage={},
+                        finish_reason="stop"
+                    )
+                
+                async def _parse_stream_chunk(self, chunk):
+                    return "test chunk"
+                
+                def _get_auth_headers(self):
+                    return {"Authorization": f"Bearer {self.api_key}"}
+            
+            # 注册适配器 - 使用 ModelType.CUSTOM 而不是字符串
+            ModelAdapter.register_adapter(ModelType.CUSTOM, TestAdapter)
+            
+            # 验证注册成功
+            supported_models = ModelAdapter.get_supported_models()
+            assert ModelType.CUSTOM in supported_models
+            
+        finally:
+            # 恢复原来的适配器
+            if original_adapter:
+                ModelAdapter.register_adapter(ModelType.CUSTOM, original_adapter)
+            else:
+                # 如果原来没有注册，则删除
+                if ModelType.CUSTOM in ModelAdapter._adapters:
+                    del ModelAdapter._adapters[ModelType.CUSTOM]
     
     def test_create_adapter(self):
         """测试创建适配器"""
@@ -447,23 +486,24 @@ class TestModelAdapterFactory:
     
     def test_create_adapter_unknown_type(self):
         """测试创建未知类型适配器"""
-        config = create_model_config(
-            model_type="unknown_type",
-            model_name="unknown-model",
-            api_key="test-key"
-        )
-        
-        with pytest.raises(ValueError, match="Unsupported model type"):
-            ModelAdapter.create_adapter(config)
+        # 测试无效的 model_type 字符串会在 create_model_config 时抛出 ValueError
+        with pytest.raises(ValueError, match="'unknown_type' is not a valid ModelType"):
+            create_model_config(
+                model_type="unknown_type",
+                model_name="unknown-model",
+                api_key="test-key"
+            )
     
     def test_get_supported_models(self):
         """测试获取支持的模型"""
         supported = ModelAdapter.get_supported_models()
         
         assert isinstance(supported, list)
-        assert "openai" in supported
-        assert "doubao" in supported
-        assert "custom" in supported
+        # 检查 ModelType 枚举值
+        supported_values = [model_type.value for model_type in supported]
+        assert "openai" in supported_values
+        assert "doubao" in supported_values
+        assert "custom" in supported_values
     
     @pytest.mark.asyncio
     async def test_test_adapter_success(self):
@@ -475,20 +515,21 @@ class TestModelAdapterFactory:
         )
         
         # 模拟成功的适配器
-        with patch('agently_format.adapters.openai_adapter.OpenAIAdapter.validate_api_key') as mock_validate:
-            mock_validate.return_value = True
+        with patch('agently_format.adapters.openai_adapter.OpenAIAdapter._non_stream_chat_completion') as mock_chat:
+            mock_response = ModelResponse(
+                content="Test response",
+                model="gpt-3.5-turbo",
+                usage={"total_tokens": 10},
+                finish_reason="stop"
+            )
+            mock_chat.return_value = mock_response
             
-            with patch('agently_format.adapters.openai_adapter.OpenAIAdapter.get_model_info') as mock_info:
-                mock_info.return_value = {
-                    "max_tokens": 4096,
-                    "context_window": 4096
-                }
-                
-                result = await ModelAdapter.test_adapter(config)
-                
-                assert result["success"] is True
-                assert "model_name" in result
-                assert "max_tokens" in result
+            result = await ModelAdapter.test_adapter(config)
+            
+            assert result["success"] is True
+            assert "model_name" in result
+            assert "response_length" in result
+            assert result["model_name"] == "gpt-3.5-turbo"
     
     @pytest.mark.asyncio
     async def test_test_adapter_failure(self):
@@ -500,13 +541,14 @@ class TestModelAdapterFactory:
         )
         
         # 模拟失败的适配器
-        with patch('agently_format.adapters.openai_adapter.OpenAIAdapter.validate_api_key') as mock_validate:
-            mock_validate.return_value = False
+        with patch('agently_format.adapters.openai_adapter.OpenAIAdapter.chat_completion') as mock_chat:
+            mock_chat.side_effect = Exception("Invalid API key")
             
             result = await ModelAdapter.test_adapter(config)
             
             assert result["success"] is False
             assert "error" in result
+            assert "Invalid API key" in result["error"]
 
 
 @pytest.mark.integration
@@ -530,7 +572,7 @@ class TestAdapterIntegration:
         assert adapter.model_name == "gpt-3.5-turbo"
         
         # 模拟使用
-        with patch.object(adapter, 'chat_completion') as mock_chat:
+        with patch.object(adapter, '_non_stream_chat_completion') as mock_chat:
             mock_chat.return_value = ModelResponse(
                 content="Test response",
                 model="gpt-3.5-turbo",
@@ -542,6 +584,7 @@ class TestAdapterIntegration:
             assert response.content == "Test response"
         
         # 关闭适配器
+        adapter._setup_client()  # 确保客户端已初始化
         await adapter.close()
         assert adapter.client.is_closed
     
@@ -605,7 +648,7 @@ class TestAdapterPerformance:
         
         # 模拟并发请求
         async def mock_request():
-            with patch.object(adapter, 'chat_completion') as mock_chat:
+            with patch.object(adapter, '_non_stream_chat_completion') as mock_chat:
                 mock_chat.return_value = ModelResponse(
                     content="Response",
                     model="gpt-3.5-turbo",
@@ -713,13 +756,17 @@ class TestWenxinAdapter:
         )
         
         adapter = WenxinAdapter(config)
+        adapter._setup_client()  # 确保客户端已初始化
         
-        # 模拟成功响应
-        with patch.object(adapter, '_make_request') as mock_request:
-            mock_request.return_value = {
+        # 模拟HTTP客户端响应
+        with patch.object(adapter.client, 'post') as mock_post:
+            mock_response = Mock()
+            mock_response.json.return_value = {
                 "access_token": "test-access-token",
                 "expires_in": 2592000
             }
+            mock_response.raise_for_status.return_value = None
+            mock_post.return_value = mock_response
             
             token = await adapter._get_access_token()
             assert token == "test-access-token"

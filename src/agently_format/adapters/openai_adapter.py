@@ -31,10 +31,10 @@ class OpenAIAdapter(BaseModelAdapter):
         self.api_key = config.api_key
         self.base_url = config.base_url
     
-    async def chat_completion(
-        self,
-        messages: List[Dict[str, str]],
-        stream: bool = False,
+    def chat_completion(
+        self, 
+        messages: List[Dict[str, str]], 
+        stream: bool = False, 
         **kwargs
     ) -> Union[ModelResponse, AsyncGenerator[str, None]]:
         """OpenAI聊天补全
@@ -50,10 +50,36 @@ class OpenAIAdapter(BaseModelAdapter):
         payload = self._build_request_payload(messages, stream=stream, **kwargs)
         
         if stream:
-            return self._make_request("/chat/completions", payload, stream=True)
+            return self._stream_chat_completion(payload)
         else:
-            response_data = await self._make_request("/chat/completions", payload, stream=False)
-            return self._parse_response(response_data)
+            return self._non_stream_chat_completion(payload)
+    
+    async def _non_stream_chat_completion(self, payload: Dict[str, Any]) -> ModelResponse:
+        """非流式聊天补全
+        
+        Args:
+            payload: 请求载荷
+            
+        Returns:
+            ModelResponse: 响应结果
+        """
+        response_data = await self._make_request("/chat/completions", payload, stream=False)
+        return self._parse_response(response_data)
+    
+    async def _stream_chat_completion(self, payload: Dict[str, Any]) -> AsyncGenerator[str, None]:
+        """流式聊天补全
+        
+        Args:
+            payload: 请求载荷
+            
+        Yields:
+            str: 流式响应内容
+        """
+        headers = self._get_auth_headers()
+        async for chunk in self._stream_request("/chat/completions", payload, headers):
+            parsed_chunk = await self._parse_stream_chunk(chunk)
+            if parsed_chunk:
+                yield parsed_chunk
     
     def _build_request_payload(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
         """构建OpenAI请求载荷
@@ -68,6 +94,8 @@ class OpenAIAdapter(BaseModelAdapter):
         payload = {
             "model": self.config.model_name,
             "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 1000,
             **self.config.request_params
         }
         

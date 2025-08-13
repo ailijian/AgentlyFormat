@@ -30,7 +30,7 @@ class DoubaoAdapter(BaseModelAdapter):
         self.api_key = config.api_key
         self.base_url = config.base_url
     
-    async def chat_completion(
+    def chat_completion(
         self,
         messages: List[Dict[str, str]],
         stream: bool = False,
@@ -46,13 +46,48 @@ class DoubaoAdapter(BaseModelAdapter):
         Returns:
             Union[ModelResponse, AsyncGenerator[str, None]]: 响应或流式生成器
         """
-        payload = self._build_request_payload(messages, stream=stream, **kwargs)
-        
         if stream:
-            return self._make_request("/chat/completions", payload, stream=True)
+            return self._stream_chat_completion(messages, **kwargs)
         else:
-            response_data = await self._make_request("/chat/completions", payload, stream=False)
-            return self._parse_response(response_data)
+            return self._non_stream_chat_completion(messages, **kwargs)
+    
+    async def _non_stream_chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        **kwargs
+    ) -> ModelResponse:
+        """非流式聊天补全
+        
+        Args:
+            messages: 消息列表
+            **kwargs: 其他参数
+            
+        Returns:
+            ModelResponse: 响应
+        """
+        payload = self._build_request_payload(messages, stream=False, **kwargs)
+        response_data = await self._make_request("/chat/completions", payload, stream=False)
+        return self._parse_response(response_data)
+    
+    async def _stream_chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        **kwargs
+    ) -> AsyncGenerator[str, None]:
+        """流式聊天补全
+        
+        Args:
+            messages: 消息列表
+            **kwargs: 其他参数
+            
+        Yields:
+            str: 流式响应内容
+        """
+        payload = self._build_request_payload(messages, stream=True, **kwargs)
+        headers = self._get_auth_headers()
+        
+        async for content in self._stream_request("/chat/completions", payload, headers):
+            yield content
     
     def _build_request_payload(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
         """构建豆包请求载荷

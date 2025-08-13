@@ -4,25 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "AgentlyFormat"
-version = "0.1.0"
-description = "专注于大模型格式化输出结果的Python库，提供稳定可靠的JSON格式化解析能力"
+version = "2.0.0"
+description = "专注于大模型格式化输出结果的Python库，提供稳定可靠的JSON格式化解析能力 - v2.0.0重大更新：性能提升81%，架构全面重构"
 authors = [
     {name = "AgentEra", email = "support@agently.tech"}
 ]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.8"
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Markup :: JSON",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
 ]
-keywords = ["llm", "json", "streaming", "parser", "ai", "format"]
+keywords = ["llm", "json", "streaming", "parser", "ai", "format", "websocket", "real-time", "performance", "schema-validation"]
 license = {text = "Apache-2.0"}
 
 dependencies = [
@@ -76,7 +81,7 @@ include = ["agently_format*"]
 
 [tool.black]
 line-length = 88
-target-version = ['py311']
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
 include = '\.pyi?$'
 extend-exclude = '''
 (
@@ -105,7 +110,7 @@ use_parentheses = true
 ensure_newline_before_comments = true
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.8"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

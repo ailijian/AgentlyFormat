@@ -87,6 +87,7 @@ async def health_check(state: AppState = Depends(get_app_state)):
     }
     
     return HealthCheckResponse(
+        message="Service is healthy",
         version=settings.app_version,
         uptime=uptime,
         dependencies=dependencies
@@ -99,11 +100,22 @@ async def get_stats(state: AppState = Depends(get_app_state)):
     """获取统计信息"""
     metrics = get_metrics()
     
+    # 从事件系统获取统计数据
+    from ..core.event_system import get_global_emitter
+    emitter = get_global_emitter()
+    event_stats = emitter.get_stats()
+    
+    # 转换events_by_type为字符串键的字典
+    events_by_type_str = {}
+    for event_type, count in event_stats.events_by_type.items():
+        events_by_type_str[event_type.value] = count
+    
     return StatsResponse(
+        message="Statistics retrieved successfully",
         total_requests=metrics.get("total_requests", 0),
         active_sessions=len(state.sessions),
-        total_events=0,  # TODO: 从事件系统获取
-        events_by_type={},  # TODO: 从事件系统获取
+        total_events=event_stats.total_events,
+        events_by_type=events_by_type_str,
         average_response_time=metrics.get("average_response_time", 0),
         error_rate=metrics.get("error_rate", 0),
         uptime=metrics.get("uptime", 0)
@@ -257,6 +269,9 @@ async def parse_stream(
             parser = StreamingParser()
             state.parsers[session_id] = parser
             
+            # 创建解析会话
+            parser.create_session(session_id)
+            
             # 创建会话（如果不存在）
             if session_id not in state.sessions:
                 state.sessions[session_id] = {
@@ -271,17 +286,10 @@ async def parse_stream(
             parser = state.parsers[session_id]
         
         # 解析数据块
-        events = []
-        
-        async def event_callback(event):
-            events.append(event.to_dict())
-        
-        result = await parser.parse_chunk(
+        events = await parser.parse_chunk(
             request.chunk,
             session_id=session_id,
-            is_final=request.is_final,
-            expected_schema=request.expected_schema,
-            callback=event_callback
+            is_final=request.is_final
         )
         
         # 更新会话活动时间
@@ -292,13 +300,22 @@ async def parse_stream(
         # 获取当前解析状态
         parsing_state = parser.get_parsing_state(session_id)
         
+        # 转换事件为字典格式
+        event_dicts = [event.to_dict() for event in events]
+        
+        # 计算进度
+        progress = 0.0
+        if parsing_state and parsing_state.total_chunks > 0:
+            progress = parsing_state.processed_chunks / parsing_state.total_chunks
+        
         return StreamParseResponse(
+            status=StatusEnum.SUCCESS,
             message="Stream parsing successful",
             session_id=session_id,
-            events=events,
+            events=event_dicts,
             current_data=parsing_state.current_data if parsing_state else None,
             is_complete=parsing_state.is_complete if parsing_state else False,
-            progress=parsing_state.progress if parsing_state else 0.0
+            progress=progress
         )
         
     except Exception as e:
@@ -307,7 +324,7 @@ async def parse_stream(
 
 # 模型配置
 @router.post("/model/config", response_model=ModelConfigResponse)
-async def create_model_config(
+async def create_model_config_endpoint(
     request: ModelConfigRequest,
     state: AppState = Depends(get_app_state)
 ):
@@ -367,16 +384,22 @@ async def chat(
             if request.config_id not in state.model_configs:
                 raise HTTPException(status_code=404, detail="Model config not found")
             config = state.model_configs[request.config_id]["config"]
-        elif request.model_config:
+        elif request.model_config_data:
+            # 处理model_config_data，可能是字典或对象
+            if isinstance(request.model_config_data, dict):
+                model_config_data = request.model_config_data
+            else:
+                model_config_data = request.model_config_data.model_dump()
+            
             config = create_model_config(
-                model_type=request.model_config.model_type,
-                model_name=request.model_config.model_name,
-                api_key=request.model_config.api_key,
-                base_url=request.model_config.base_url,
-                api_version=request.model_config.api_version,
-                request_params=request.model_config.request_params,
-                headers=request.model_config.headers,
-                timeout=request.model_config.timeout
+                model_type=model_config_data.get("model_type"),
+                model_name=model_config_data.get("model_name"),
+                api_key=model_config_data.get("api_key"),
+                base_url=model_config_data.get("base_url"),
+                api_version=model_config_data.get("api_version"),
+                request_params=model_config_data.get("request_params"),
+                headers=model_config_data.get("headers"),
+                timeout=model_config_data.get("timeout")
             )
         else:
             raise HTTPException(status_code=400, detail="Model config required")
@@ -385,7 +408,7 @@ async def chat(
         adapter = ModelAdapter.create_adapter(config)
         
         # 转换消息格式
-        messages = [msg.dict() for msg in request.messages]
+        messages = [msg.model_dump() for msg in request.messages]
         
         # 调用模型
         if request.stream:

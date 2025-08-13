@@ -34,21 +34,24 @@ class BaseModelAdapter(ABC):
             config: 模型配置
         """
         self.config = config
-        self.client = None
-        self._setup_client()
+        self.model_name = config.model_name
+        self.api_key = config.api_key
+        self.base_url = config.base_url
+        self.client = None  # 延迟初始化
     
     def _setup_client(self):
-        """设置HTTP客户端"""
-        headers = {
-            "Content-Type": "application/json",
-            **self.config.headers
-        }
-        
-        self.client = httpx.AsyncClient(
-            base_url=self.config.base_url,
-            headers=headers,
-            timeout=self.config.timeout
-        )
+        """确保HTTP客户端已初始化"""
+        if self.client is None:
+            headers = {
+                "Content-Type": "application/json",
+                **self.config.headers
+            }
+            
+            self.client = httpx.AsyncClient(
+                base_url=self.config.base_url,
+                headers=headers,
+                timeout=self.config.timeout
+            )
     
     @abstractmethod
     async def chat_completion(
@@ -122,6 +125,7 @@ class BaseModelAdapter(ABC):
         Returns:
             Union[Dict[str, Any], AsyncGenerator[str, None]]: 响应数据或流式生成器
         """
+        self._setup_client()  # 延迟初始化客户端
         headers = self._get_auth_headers()
         
         if stream:
@@ -151,6 +155,7 @@ class BaseModelAdapter(ABC):
         Yields:
             str: 响应块
         """
+        self._setup_client()  # 确保客户端已初始化
         async with self.client.stream(
             "POST",
             endpoint,
@@ -176,7 +181,7 @@ class BaseModelAdapter(ABC):
     
     async def close(self):
         """关闭客户端"""
-        if self.client:
+        if self.client and not self.client.is_closed:
             await self.client.aclose()
     
     def __del__(self):

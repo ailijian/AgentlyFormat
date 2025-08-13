@@ -105,7 +105,79 @@ async def async_client(app):
 @pytest.fixture
 def streaming_parser():
     """流式解析器夹具"""
-    return StreamingParser()
+    return StreamingParser(
+        enable_diff_engine=True,
+        enable_completion=True,
+        chunk_timeout=5.0
+    )
+
+
+@pytest.fixture
+def enhanced_streaming_parser():
+    """增强流式解析器夹具"""
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer", "minimum": 0},
+            "email": {"type": "string", "format": "email"}
+        }
+    }
+    
+    return StreamingParser(
+        enable_diff_engine=True,
+        enable_schema_validation=True,
+        enable_enhanced_stats=True,
+        adaptive_timeout_enabled=True,
+        schema=schema,
+        buffer_size=1024
+    )
+
+
+@pytest.fixture
+def chunk_buffer():
+    """块缓冲区夹具"""
+    from agently_format.core.streaming_parser import ChunkBuffer
+    return ChunkBuffer(max_size=512)
+
+
+@pytest.fixture
+def adaptive_timeout():
+    """自适应超时夹具"""
+    from agently_format.core.streaming_parser import AdaptiveTimeout
+    return AdaptiveTimeout(
+        initial_timeout=1.0,
+        max_timeout=10.0,
+        backoff_factor=2.0
+    )
+
+
+@pytest.fixture
+def schema_validator():
+    """Schema验证器夹具"""
+    from agently_format.core.schemas import SchemaValidator
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer", "minimum": 0}
+        }
+    }
+    return SchemaValidator(schema)
+
+
+@pytest.fixture
+def diff_engine():
+    """差分引擎夹具"""
+    from agently_format.core.diff_engine import StructuredDiffEngine, DiffMode, CoalescingConfig
+    return StructuredDiffEngine(
+        diff_mode=DiffMode.SMART,
+        coalescing_config=CoalescingConfig(
+            enabled=True,
+            time_window_ms=100,
+            max_coalesced_events=5
+        )
+    )
 
 
 @pytest.fixture
