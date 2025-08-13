@@ -335,6 +335,18 @@ PREDEFINED_MODELS = {
 }
 
 
+@dataclass
+class ChatMessage:
+    """聊天消息"""
+    role: str
+    content: str
+    
+    def __post_init__(self):
+        """验证角色"""
+        if self.role not in ['system', 'user', 'assistant']:
+            raise ValueError("Role must be one of: system, user, assistant")
+
+
 def create_model_config(
     model_type: Union[ModelType, str],
     model_name: str,

@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional
 
 from agently_format.core.streaming_parser import StreamingParser
 from agently_format.core.event_system import EventEmitter
-from agently_format.core.types import ParseEvent, ParseEventType
+from agently_format.types import ParseEvent, ParseEventType
 
 
 class StreamingDemo:
@@ -118,6 +118,9 @@ async def simple_streaming_example():
     
     session_id = "simple-demo"
     
+    # 创建解析会话
+    demo.parser.create_session(session_id)
+    
     print(f"开始解析 {len(json_chunks)} 个数据块...\n")
     
     for i, chunk in enumerate(json_chunks):
@@ -127,15 +130,23 @@ async def simple_streaming_example():
         await asyncio.sleep(0.1)
         
         # 解析块
-        result = await demo.parser.parse_chunk(
+        events = await demo.parser.parse_chunk(
             chunk=chunk,
             session_id=session_id,
             is_final=(i == len(json_chunks) - 1)
         )
         
-        print(f"  状态: {result.status}")
-        print(f"  进度: {result.progress:.1%}")
-        print(f"  完成: {result.is_complete}")
+        # 获取解析状态
+        state = demo.parser.get_session_state(session_id)
+        
+        print(f"  事件数: {len(events)}")
+        if state:
+            progress = state.processed_chunks / state.total_chunks if state.total_chunks > 0 else 0
+            print(f"  进度: {progress:.1%}")
+            print(f"  完成: {getattr(state, 'is_complete', False)}")
+        else:
+            print(f"  进度: 未知")
+            print(f"  完成: 未知")
         print()
     
     # 获取最终结果
@@ -192,6 +203,9 @@ async def complex_streaming_example():
     
     session_id = "complex-demo"
     
+    # 创建解析会话
+    demo.parser.create_session(session_id)
+    
     print(f"原始JSON大小: {len(json_str)} 字符")
     print(f"分为 {len(chunks)} 个块进行处理...\n")
     
@@ -203,14 +217,19 @@ async def complex_streaming_example():
         # 模拟网络传输延迟
         await asyncio.sleep(0.05)
         
-        result = await demo.parser.parse_chunk(
+        events = await demo.parser.parse_chunk(
             chunk=chunk,
             session_id=session_id,
             is_final=(i == len(chunks) - 1)
         )
         
         if i % 5 == 0 or i == len(chunks) - 1:  # 每5块显示一次进度
-            print(f"  进度: {result.progress:.1%}")
+            state = demo.parser.get_session_state(session_id)
+            if state:
+                progress = state.processed_chunks / state.total_chunks if state.total_chunks > 0 else 0
+                print(f"  进度: {progress:.1%}")
+            else:
+                print(f"  进度: 未知")
     
     end_time = time.time()
     
@@ -252,21 +271,25 @@ async def error_handling_example():
     
     session_id = "error-demo"
     
+    # 创建解析会话
+    demo.parser.create_session(session_id)
+    
     print("处理包含错误的JSON块...\n")
     
     for i, chunk in enumerate(error_chunks):
         print(f"块 {i + 1}: '{chunk}'")
         
         try:
-            result = await demo.parser.parse_chunk(
+            events = await demo.parser.parse_chunk(
                 chunk=chunk,
                 session_id=session_id,
                 is_final=(i == len(error_chunks) - 1)
             )
             
-            print(f"  状态: {result.status}")
-            if result.errors:
-                print(f"  错误: {result.errors}")
+            state = demo.parser.get_session_state(session_id)
+            print(f"  事件数: {len(events)}")
+            if state and state.errors:
+                print(f"  错误: {state.errors}")
             
         except Exception as e:
             print(f"  异常: {e}")
@@ -321,6 +344,9 @@ async def performance_streaming_example():
     
     session_id = "performance-demo"
     
+    # 创建解析会话
+    demo.parser.create_session(session_id)
+    
     print(f"性能测试数据:")
     print(f"  JSON大小: {len(json_str):,} 字符")
     print(f"  用户数量: {len(large_data['users'])}")
@@ -332,7 +358,7 @@ async def performance_streaming_example():
     
     # 处理所有块
     for i, chunk in enumerate(chunks):
-        result = await demo.parser.parse_chunk(
+        events = await demo.parser.parse_chunk(
             chunk=chunk,
             session_id=session_id,
             is_final=(i == len(chunks) - 1)
@@ -340,7 +366,12 @@ async def performance_streaming_example():
         
         # 每10块显示一次进度
         if i % 10 == 0 or i == len(chunks) - 1:
-            print(f"进度: {i + 1}/{len(chunks)} ({result.progress:.1%})")
+            state = demo.parser.get_session_state(session_id)
+            if state:
+                progress = state.processed_chunks / state.total_chunks if state.total_chunks > 0 else 0
+                print(f"进度: {i + 1}/{len(chunks)} ({progress:.1%})")
+            else:
+                print(f"进度: {i + 1}/{len(chunks)} (未知)")
     
     end_time = time.time()
     
@@ -391,10 +422,13 @@ async def multi_session_example():
     
     async def process_session(session_id: str, chunks: List[str]):
         """处理单个会话"""
+        # 创建解析会话
+        demo.parser.create_session(session_id)
+        
         print(f"会话 {session_id} 开始处理 {len(chunks)} 个块")
         
         for i, chunk in enumerate(chunks):
-            await demo.parser.parse_chunk(
+            events = await demo.parser.parse_chunk(
                 chunk=chunk,
                 session_id=session_id,
                 is_final=(i == len(chunks) - 1)

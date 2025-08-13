@@ -11,6 +11,7 @@ from .qianwen_adapter import QianwenAdapter
 from .deepseek_adapter import DeepSeekAdapter
 from .kimi_adapter import KimiAdapter
 from .custom_adapter import CustomAdapter
+from .factory import ModelAdapterFactory
 
 __all__ = [
     "ModelAdapter",
@@ -22,4 +23,5 @@ __all__ = [
     "DeepSeekAdapter",
     "KimiAdapter",
     "CustomAdapter",
+    "ModelAdapterFactory",
 ]

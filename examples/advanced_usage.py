@@ -13,7 +13,7 @@ from agently_format.core.streaming_parser import StreamingParser
 from agently_format.core.json_completer import JSONCompleter
 from agently_format.core.path_builder import PathBuilder
 from agently_format.core.event_system import EventEmitter
-from agently_format.core.types import (
+from agently_format.types import (
     ParseEvent, ParseEventType, CompletionStrategy,
     PathStyle, ModelConfig, ChatMessage
 )
@@ -168,14 +168,14 @@ class AdvancedJSONProcessor:
         print(f"🔍 执行智能路径分析 ({analysis_type})...")
         
         # 构建所有路径
-        all_paths = await self.path_builder.build_paths(
+        all_paths = self.path_builder.build_paths(
             data,
             style=PathStyle.DOT,
             include_arrays=True
         )
         
         analysis_result = {
-            "total_paths": len(all_paths.paths),
+            "total_paths": len(all_paths),
             "analysis_type": analysis_type,
             "statistics": {},
             "recommendations": [],
@@ -184,13 +184,13 @@ class AdvancedJSONProcessor:
         
         if analysis_type == "comprehensive":
             # 深度分析
-            analysis_result.update(await self._comprehensive_path_analysis(data, all_paths.paths))
+            analysis_result.update(await self._comprehensive_path_analysis(data, all_paths))
         elif analysis_type == "performance":
             # 性能分析
-            analysis_result.update(await self._performance_path_analysis(data, all_paths.paths))
+            analysis_result.update(await self._performance_path_analysis(data, all_paths))
         elif analysis_type == "structure":
             # 结构分析
-            analysis_result.update(await self._structure_path_analysis(data, all_paths.paths))
+            analysis_result.update(await self._structure_path_analysis(data, all_paths))
         
         return analysis_result
     
@@ -212,7 +212,7 @@ class AdvancedJSONProcessor:
         type_distribution = {}
         for path in paths:
             try:
-                value = await self.path_builder.get_value_by_path(data, path)
+                value = self.path_builder.get_value_by_path(data, path)
                 value_type = type(value).__name__
                 type_distribution[value_type] = type_distribution.get(value_type, 0) + 1
             except:
@@ -246,7 +246,7 @@ class AdvancedJSONProcessor:
         for path in paths[:50]:  # 测试前50个路径
             path_start = time.time()
             try:
-                await self.path_builder.get_value_by_path(data, path)
+                self.path_builder.get_value_by_path(data, path)
                 access_times.append(time.time() - path_start)
             except:
                 continue
@@ -304,6 +304,9 @@ class AdvancedJSONProcessor:
         """自适应流式处理"""
         print(f"🔄 开始自适应流式处理 (会话: {session_id})...")
         
+        # 创建解析会话
+        self.streaming_parser.create_session(session_id)
+        
         config = adaptive_config or {
             "chunk_size_adjustment": True,
             "error_recovery": True,
@@ -341,7 +344,7 @@ class AdvancedJSONProcessor:
             
             try:
                 # 处理块
-                result = await self.streaming_parser.parse_chunk(
+                events = await self.streaming_parser.parse_chunk(
                     chunk=process_chunk,
                     session_id=session_id,
                     is_final=(i == len(chunks) - 1)
@@ -362,8 +365,9 @@ class AdvancedJSONProcessor:
                         print(f"⚡ 检测到性能下降，调整处理策略")
                 
                 # 错误恢复
-                if result.errors and config.get("error_recovery"):
-                    print(f"🔧 检测到错误，尝试恢复: {result.errors}")
+                state = self.streaming_parser.get_session_state(session_id)
+                if state and state.errors and config.get("error_recovery"):
+                    print(f"🔧 检测到错误，尝试恢复: {state.errors}")
                     # 可以在这里实现错误恢复逻辑
                 
             except Exception as e:
@@ -376,7 +380,7 @@ class AdvancedJSONProcessor:
         
         # 处理剩余缓冲区
         if buffer and config.get("dynamic_buffering"):
-            await self.streaming_parser.parse_chunk(
+            events = await self.streaming_parser.parse_chunk(
                 chunk=buffer,
                 session_id=session_id,
                 is_final=True
@@ -392,7 +396,7 @@ class AdvancedJSONProcessor:
                 "processed_chunks": self.metrics.processed_chunks,
                 "processing_time": round(self.metrics.processing_time, 3),
                 "average_chunk_time": round(sum(processing_times) / len(processing_times), 4) if processing_times else 0,
-                "throughput": round(self.metrics.processed_chunks / self.metrics.processing_time, 2),
+                "throughput": round(self.metrics.processed_chunks / self.metrics.processing_time, 2) if self.metrics.processing_time > 0 else 0,
                 "error_count": len(self.metrics.errors)
             },
             "performance": {
