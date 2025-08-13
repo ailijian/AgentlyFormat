@@ -983,7 +983,7 @@ agently-format batch --input-dir ./data --output-dir ./results --format json
 ## 🔗 相关资源
 
 - **项目主页**: [GitHub Repository](https://github.com/AgentlyFormat/AgentlyFormat)
-- **完整文档**: [Documentation Site](https://docs.agentlyformat.com)
+- **完整文档**: [Documentation Site](https://github.com/ailijian/AgentlyFormat/blob/main/docs/AgentlyFormat%E6%9C%80%E4%BD%B3%E5%AE%9E%E8%B7%B5%E6%8C%87%E5%8D%97.md)
 - **示例代码**: [Examples Repository](https://github.com/AgentlyFormat/examples)
 - **社区讨论**: [GitHub Discussions](https://github.com/AgentlyFormat/AgentlyFormat/discussions)
 - **问题反馈**: [GitHub Issues](https://github.com/AgentlyFormat/AgentlyFormat/issues)
