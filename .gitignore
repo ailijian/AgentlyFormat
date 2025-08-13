@@ -183,3 +183,6 @@ config/secrets.yaml
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Trae AI generated files
+.trae/
