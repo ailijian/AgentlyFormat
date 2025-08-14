@@ -4,7 +4,8 @@
 """
 
 import json
-from typing import Any, Dict, List, Optional, AsyncGenerator, Union
+from typing import Any, Dict, List, Optional, AsyncGenerator, Union, Awaitable
+import aiohttp
 
 from .model_adapter import BaseModelAdapter, ModelResponse
 from ..types.models import ModelType
@@ -35,20 +36,22 @@ class DoubaoAdapter(BaseModelAdapter):
         messages: List[Dict[str, str]],
         stream: bool = False,
         **kwargs
-    ) -> Union[ModelResponse, AsyncGenerator[str, None]]:
-        """豆包聊天补全
+    ) -> Union[Awaitable[ModelResponse], AsyncGenerator[str, None]]:
+        """聊天补全接口
         
         Args:
             messages: 消息列表
-            stream: 是否流式返回
+            stream: 是否流式输出
             **kwargs: 其他参数
             
         Returns:
-            Union[ModelResponse, AsyncGenerator[str, None]]: 响应或流式生成器
+            Union[Awaitable[ModelResponse], AsyncGenerator[str, None]]: 响应或流式生成器
         """
         if stream:
+            # 对于流式调用，直接返回async generator
             return self._stream_chat_completion(messages, **kwargs)
         else:
+            # 对于非流式调用，返回awaitable
             return self._non_stream_chat_completion(messages, **kwargs)
     
     async def _non_stream_chat_completion(
@@ -74,7 +77,7 @@ class DoubaoAdapter(BaseModelAdapter):
         messages: List[Dict[str, str]],
         **kwargs
     ) -> AsyncGenerator[str, None]:
-        """流式聊天补全
+        """流式聊天补全 - 直接输出文本增量
         
         Args:
             messages: 消息列表
@@ -83,11 +86,15 @@ class DoubaoAdapter(BaseModelAdapter):
         Yields:
             str: 流式响应内容
         """
-        payload = self._build_request_payload(messages, stream=True, **kwargs)
+        payload = self._build_request_payload(messages, **kwargs)
+        payload["stream"] = True
         headers = self._get_auth_headers()
         
-        async for content in self._stream_request("/chat/completions", payload, headers):
-            yield content
+        # 豆包返回纯文本流，直接输出增量内容
+        async for line in self._stream_request("/chat/completions", payload, headers):
+            content = self._parse_stream_chunk(line)
+            if content:
+                yield content
     
     def _build_request_payload(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
         """构建豆包请求载荷
@@ -140,37 +147,38 @@ class DoubaoAdapter(BaseModelAdapter):
             }
         )
     
-    async def _parse_stream_chunk(self, chunk: str) -> Optional[str]:
-        """解析豆包流式响应块
+    def _parse_stream_chunk(self, line: str) -> Optional[str]:
+        """解析流式响应的单个数据块
         
         Args:
-            chunk: 响应块
+            line: 原始响应行数据
             
         Returns:
-            Optional[str]: 解析出的内容
+            Optional[str]: 解析出的内容增量，如果没有内容则返回None
         """
-        # 豆包流式响应格式类似OpenAI: "data: {json}\n\n"
-        lines = chunk.strip().split('\n')
+        if not line.strip():
+            return None
         
-        for line in lines:
-            if line.startswith('data: '):
-                data_str = line[6:]  # 移除"data: "前缀
+        if line.startswith("data: "):
+            data_content = line[6:].strip()
+            
+            if data_content == "[DONE]":
+                return None
+            
+            try:
+                data = json.loads(data_content)
                 
-                if data_str == '[DONE]':
-                    return None
-                
-                try:
-                    data = json.loads(data_str)
+                if "choices" in data and len(data["choices"]) > 0:
+                    choice = data["choices"][0]
                     
-                    if "choices" in data and len(data["choices"]) > 0:
-                        delta = data["choices"][0].get("delta", {})
-                        content = delta.get("content")
-                        
-                        if content:
-                            return content
-                            
-                except json.JSONDecodeError:
-                    continue
+                    if "delta" in choice and "content" in choice["delta"]:
+                        content = choice["delta"]["content"]
+                        return content if content else None
+                
+                return None
+            except json.JSONDecodeError:
+                # 忽略JSON解析错误，可能是不完整的数据块
+                return None
         
         return None
     

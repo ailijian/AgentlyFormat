@@ -902,150 +902,163 @@ class StreamingParser:
     async def _compare_and_generate_events(
         self, 
         state: ParsingState, 
-        new_data: Dict[str, Any]
+        new_data: Any
     ) -> List[StreamingEvent]:
-        """比较数据并生成事件
+        """比较数据并生成事件 - 支持文本和JSON两种格式
+        
+        参考agently项目的稳定实现，支持：
+        1. 纯文本流式输出（字符串增量）
+        2. JSON结构化流式输出（字段增量）
         
         Args:
             state: 解析状态
-            new_data: 新数据
+            new_data: 新数据（可以是字符串或字典）
             
         Returns:
             List[StreamingEvent]: 事件列表
         """
         events = []
-        current_time = time.time()
         
-        if self.enable_diff_engine and self.diff_engine:
-            # 使用差分引擎进行结构化差分
-            diff_results = self.diff_engine.compute_diff(
-                old_data=state.current_data,
-                new_data=new_data
-            )
-            
-            # 为每个差分结果生成事件
-            for diff_result in diff_results:
-                # 计算路径哈希
-                path_hash = state.calculate_path_hash(diff_result.path, diff_result.new_value)
-                
-                # 计算置信度（基于数据完整性和稳定性）
-                confidence = self._calculate_confidence(diff_result, state)
-                
-                # 使用差分引擎的幂等事件发射（扩展字段）
-                delta_event = self.diff_engine.emit_delta_event(
-                    diff_result=diff_result,
-                    session_id=state.session_id,
-                    sequence_number=state.increment_sequence()
-                )
-                
-                if delta_event:  # 如果事件未被抑制
-                    events.append(delta_event)
-                
-                # 更新路径哈希记录
-                state.path_hashes[diff_result.path] = path_hash
-                
-                # 检查字段是否完成
-                if self._should_mark_field_complete(diff_result.path, diff_result.new_value, state):
-                    if diff_result.path not in state.completed_fields:
-                        done_event = create_done_event(
-                            path=diff_result.path,
-                            final_value=diff_result.new_value,
-                            session_id=state.session_id,
-                            sequence_number=state.increment_sequence(),
-                            validation_passed=True,
-                            metadata={
-                                "path_hash": path_hash,
-                                "confidence": confidence,
-                                "timing": {
-                                    "completion_time": current_time,
-                                    "total_processing_time": current_time - state.enhanced_stats.start_time.timestamp()
-                                },
-                                "stability_confirmed": True
-                            }
-                        )
-                        events.append(done_event)
-                        state.completed_fields.add(diff_result.path)
-                        
-                        # 记录字段完成时间
-                        state.enhanced_stats.record_field_completion(diff_result.path)
-            
-            # 检查稳定性并发射 DONE 事件
-            done_events = self.diff_engine.check_stability_and_emit_done(
-                session_id=state.session_id,
-                sequence_number_generator=state.increment_sequence,
-                current_data=new_data
-            )
-            events.extend(done_events)
-            
-            # 刷新合并缓冲区中的事件
-            coalesced_events = self.diff_engine.flush_all_coalescing_buffers()
-            events.extend(coalesced_events)
-            
-        else:
-            # 回退到原始逻辑
-            events = await self._compare_and_generate_events_legacy(state, new_data)
+        # 处理纯文本流式输出
+        if isinstance(new_data, str):
+            return await self._handle_text_streaming(state, new_data)
+        
+        # 处理JSON结构化流式输出
+        if isinstance(new_data, dict):
+            return await self._handle_json_streaming(state, new_data)
+        
+        # 其他类型直接使用递归比较
+        await self._traverse_and_compare(
+            events=events,
+            current_data=new_data,
+            previous_data=state.current_data,
+            path="",
+            state=state
+        )
         
         return events
     
-    async def _compare_and_generate_events_legacy(
-        self, 
-        state: ParsingState, 
-        new_data: Dict[str, Any]
-    ) -> List[StreamingEvent]:
-        """传统的比较数据并生成事件方法（回退逻辑）
+    async def _handle_text_streaming(self, state: ParsingState, new_text: str) -> List[StreamingEvent]:
+        """处理纯文本流式输出
         
         Args:
             state: 解析状态
-            new_data: 新数据
+            new_text: 新文本内容
+            
+        Returns:
+            List[StreamingEvent]: 事件列表
+        """
+        events = []
+        previous_text = state.current_data if isinstance(state.current_data, str) else ""
+        
+        # 计算文本增量
+        if len(new_text) > len(previous_text):
+            delta_text = new_text[len(previous_text):]
+            
+            # 生成增量事件
+            delta_event = create_delta_event(
+                path="content",
+                value=new_text,
+                delta_value=delta_text,
+                session_id=state.session_id,
+                sequence_number=state.increment_sequence(),
+                previous_value=previous_text,
+                is_partial=True
+            )
+            events.append(delta_event)
+        
+        # 更新状态
+        state.current_data = new_text
+        return events
+    
+    async def _handle_json_streaming(self, state: ParsingState, new_data: Dict[str, Any]) -> List[StreamingEvent]:
+        """处理JSON结构化流式输出
+        
+        Args:
+            state: 解析状态
+            new_data: 新JSON数据
             
         Returns:
             List[StreamingEvent]: 事件列表
         """
         events = []
         
-        # 获取所有路径
-        new_paths = set(self.path_builder.extract_parsing_key_orders(new_data))
-        old_paths = set(self.path_builder.extract_parsing_key_orders(state.current_data))
+        # 使用简化的递归比较逻辑
+        await self._traverse_and_compare(
+            events=events,
+            current_data=new_data,
+            previous_data=state.current_data if isinstance(state.current_data, dict) else {},
+            path="",
+            state=state
+        )
         
-        # 处理新增和更新的路径
-        for path in new_paths:
-            success, new_value = self.path_builder.get_value_at_path(new_data, path)
-            if not success:
-                continue
-            
-            old_success, old_value = self.path_builder.get_value_at_path(state.current_data, path)
-            
-            if not old_success:
-                # 新字段
+        # 更新状态
+        state.current_data = new_data
+        return events
+    
+    async def _traverse_and_compare(
+        self,
+        events: List[StreamingEvent],
+        current_data: Any,
+        previous_data: Any,
+        path: str,
+        state: ParsingState
+    ) -> None:
+        """递归遍历并比较数据，生成增量事件 - 参考agently项目实现
+        
+        这是核心的比较逻辑，采用agently项目的稳定算法：
+        1. 递归遍历当前数据结构
+        2. 与之前的数据进行逐层比较
+        3. 生成准确的增量(delta)和完成(done)事件
+        4. 确保输出顺序的稳定性
+        
+        Args:
+            events: 事件列表，用于收集生成的事件
+            current_data: 当前数据
+            previous_data: 之前的数据
+            path: 当前路径
+            state: 解析状态
+        """
+        # 处理字符串类型 - 最常见的流式更新场景
+        if isinstance(current_data, str):
+            if not isinstance(previous_data, str):
+                # 新字符串字段
                 delta_event = create_delta_event(
                     path=path,
-                    value=new_value,
-                    delta_value=new_value,
+                    value=current_data,
+                    delta_value=current_data,
                     session_id=state.session_id,
                     sequence_number=state.increment_sequence(),
-                    previous_value=None,
-                    is_partial=self._is_value_partial(new_value)
+                    previous_value=previous_data,
+                    is_partial=True
                 )
                 events.append(delta_event)
-            elif old_value != new_value:
-                # 字段更新
+            elif current_data != previous_data:
+                # 字符串更新 - 计算增量部分
+                if current_data.startswith(previous_data):
+                    # 字符串追加
+                    delta_value = current_data[len(previous_data):]
+                else:
+                    # 字符串替换
+                    delta_value = current_data
+                
                 delta_event = create_delta_event(
                     path=path,
-                    value=new_value,
-                    delta_value=self._calculate_delta(old_value, new_value),
+                    value=current_data,
+                    delta_value=delta_value,
                     session_id=state.session_id,
                     sequence_number=state.increment_sequence(),
-                    previous_value=old_value,
-                    is_partial=self._is_value_partial(new_value)
+                    previous_value=previous_data,
+                    is_partial=True
                 )
                 events.append(delta_event)
             
-            # 检查字段是否完成
-            if self._should_mark_field_complete(path, new_value, state):
+            # 检查字符串是否完成
+            if self._should_mark_field_complete(path, current_data, state):
                 if path not in state.completed_fields:
                     done_event = create_done_event(
                         path=path,
-                        final_value=new_value,
+                        final_value=current_data,
                         session_id=state.session_id,
                         sequence_number=state.increment_sequence(),
                         validation_passed=True
@@ -1053,10 +1066,70 @@ class StreamingParser:
                     events.append(done_event)
                     state.completed_fields.add(path)
         
-        return events
+        # 处理基本类型 (int, float, bool, None)
+        elif isinstance(current_data, (int, float, bool, type(None))):
+            if current_data != previous_data:
+                delta_event = create_delta_event(
+                    path=path,
+                    value=current_data,
+                    delta_value=current_data,
+                    session_id=state.session_id,
+                    sequence_number=state.increment_sequence(),
+                    previous_value=previous_data,
+                    is_partial=False
+                )
+                events.append(delta_event)
+                
+                # 基本类型通常立即完成
+                if path not in state.completed_fields:
+                    done_event = create_done_event(
+                        path=path,
+                        final_value=current_data,
+                        session_id=state.session_id,
+                        sequence_number=state.increment_sequence(),
+                        validation_passed=True
+                    )
+                    events.append(done_event)
+                    state.completed_fields.add(path)
+        
+        # 处理字典类型
+        elif isinstance(current_data, dict):
+            previous_dict = previous_data if isinstance(previous_data, dict) else {}
+            
+            # 遍历当前字典的所有键
+            for key, value in current_data.items():
+                new_path = f"{path}.{key}" if path else key
+                previous_value = previous_dict.get(key)
+                
+                # 递归处理子项
+                await self._traverse_and_compare(
+                    events=events,
+                    current_data=value,
+                    previous_data=previous_value,
+                    path=new_path,
+                    state=state
+                )
+        
+        # 处理列表类型
+        elif isinstance(current_data, list):
+            previous_list = previous_data if isinstance(previous_data, list) else []
+            
+            # 遍历当前列表的所有项
+            for i, value in enumerate(current_data):
+                new_path = f"{path}[{i}]"
+                previous_value = previous_list[i] if i < len(previous_list) else None
+                
+                # 递归处理列表项
+                await self._traverse_and_compare(
+                    events=events,
+                    current_data=value,
+                    previous_data=previous_value,
+                    path=new_path,
+                    state=state
+                )
     
     def _is_value_partial(self, value: Any) -> bool:
-        """判断值是否为部分值
+        """判断值是否为部分值 - 优化的部分值判断
         
         Args:
             value: 值
@@ -1065,17 +1138,20 @@ class StreamingParser:
             bool: 是否为部分值
         """
         if isinstance(value, str):
-            # 字符串可能不完整
-            return len(value) < 1000  # 简单启发式
+             # 字符串部分值判断
+             if not value.strip():
+                 return True
+             # 如果不以完整标点结尾，可能是部分值
+             return not value.rstrip().endswith(('.', '!', '?', '。', '！', '？', '"', "'"))
         elif isinstance(value, (dict, list)):
-            # 复杂对象可能不完整
+            # 复杂对象在流式解析中通常是部分值
             return True
         else:
             # 基本类型通常是完整的
             return False
     
     def _calculate_delta(self, old_value: Any, new_value: Any) -> Any:
-        """计算增量值
+        """计算增量值 - 简化的增量计算逻辑
         
         Args:
             old_value: 旧值
@@ -1084,31 +1160,19 @@ class StreamingParser:
         Returns:
             Any: 增量值
         """
+        # 注意：在新的traverse_and_compare逻辑中，增量计算已经内置
+        # 这个方法保留用于向后兼容
         if isinstance(old_value, str) and isinstance(new_value, str):
-            # 字符串增量
             if new_value.startswith(old_value):
                 return new_value[len(old_value):]
-            else:
-                return new_value
-        elif isinstance(old_value, list) and isinstance(new_value, list):
-            # 数组增量
-            if len(new_value) > len(old_value):
-                return new_value[len(old_value):]
-            else:
-                return new_value
-        elif isinstance(old_value, dict) and isinstance(new_value, dict):
-            # 对象增量
-            delta = {}
-            for key, value in new_value.items():
-                if key not in old_value or old_value[key] != value:
-                    delta[key] = value
-            return delta
-        else:
-            # 其他情况返回新值
-            return new_value
+        
+        # 对于其他类型，直接返回新值作为增量
+        return new_value
     
     def _should_mark_field_complete(self, path: str, value: Any, state: ParsingState) -> bool:
-        """判断字段是否应该标记为完成
+        """判断字段是否应该标记为完成 - 优化的完成判断逻辑
+        
+        参考agently项目的完成判断策略，采用更保守和准确的方法
         
         Args:
             path: 字段路径
@@ -1118,16 +1182,29 @@ class StreamingParser:
         Returns:
             bool: 是否应该标记为完成
         """
-        # 简单启发式：基本类型通常是完成的
+        # 基本类型立即完成
         if isinstance(value, (int, float, bool, type(None))):
             return True
         
-        # 字符串：检查是否看起来完整
+        # 字符串完成判断 - 更严格的条件
         if isinstance(value, str):
-            # 如果字符串很短或以标点符号结尾，可能是完整的
-            return len(value) < 100 or value.endswith(('.', '!', '?', '"', "'"))
+            # 空字符串不算完成
+            if not value.strip():
+                return False
+            
+            # 检查是否以完整的句子结尾
+            if value.rstrip().endswith(('.', '!', '?', '。', '！', '？')):
+                return True
+            
+            # 检查是否以引号结尾（可能是完整的字符串）
+            if value.endswith(('"', "'", '}', ']')):
+                return True
+            
+            # 对于较短的字符串，如果看起来是完整的词或短语
+            if len(value) < 50 and not value.endswith((',', '\n', '\t')):
+                return True
         
-        # 复杂对象：需要更复杂的逻辑
+        # 复杂对象需要更复杂的逻辑
         return False
     
     async def finalize_session(self, session_id: str) -> List[StreamingEvent]:

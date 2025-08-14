@@ -153,7 +153,7 @@ class BaseModelAdapter(ABC):
             headers: 请求头
             
         Yields:
-            str: 响应块
+            str: 原始响应行数据
         """
         self._setup_client()  # 确保客户端已初始化
         async with self.client.stream(
@@ -164,11 +164,25 @@ class BaseModelAdapter(ABC):
         ) as response:
             response.raise_for_status()
             
-            async for chunk in response.aiter_text():
-                if chunk.strip():
-                    content = await self._parse_stream_chunk(chunk)
-                    if content:
-                        yield content
+            # 使用aiter_bytes()来处理原始字节流，避免aiter_lines()错误分割SSE数据
+            buffer = b""
+            async for chunk in response.aiter_bytes():
+                buffer += chunk
+                
+                # 按行分割处理SSE格式
+                while b"\n" in buffer:
+                    line_bytes, buffer = buffer.split(b"\n", 1)
+                    line = line_bytes.decode('utf-8', errors='ignore').strip()
+                    
+                    # 跳过空行
+                    if line:
+                        yield line
+            
+            # 处理最后一行（如果没有换行符结尾）
+            if buffer.strip():
+                line = buffer.decode('utf-8', errors='ignore').strip()
+                if line:
+                    yield line
     
     @abstractmethod
     def _get_auth_headers(self) -> Dict[str, str]:

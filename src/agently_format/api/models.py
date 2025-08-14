@@ -82,7 +82,7 @@ class ModelConfigResponse(BaseResponse):
     """模型配置响应"""
     status: StatusEnum = StatusEnum.SUCCESS
     config_id: str = Field(description="配置ID")
-    model_info: Dict[str, Any] = Field(description="模型信息")
+    model_information: Dict[str, Any] = Field(description="模型信息")
 
 
 # JSON补全相关
@@ -216,7 +216,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     """聊天请求"""
     messages: List[ChatMessage] = Field(description="消息列表")
-    model_config_data: Optional[ModelConfigRequest] = Field(None, description="模型配置", alias="model_config")
+    model_configuration: Optional[ModelConfigRequest] = Field(None, description="模型配置", alias="model_config")
     config_id: Optional[str] = Field(None, description="配置ID")
     stream: bool = Field(False, description="是否流式返回")
     expected_format: Optional[str] = Field(None, description="期望的返回格式")

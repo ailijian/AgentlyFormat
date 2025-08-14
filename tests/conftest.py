@@ -51,8 +51,15 @@ class TestSettings(Settings):
 def event_loop():
     """创建事件循环"""
     loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
+    asyncio.set_event_loop(loop)
+    try:
+        yield loop
+    finally:
+        # 确保所有任务完成
+        pending = asyncio.all_tasks(loop)
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.close()
 
 
 @pytest.fixture
