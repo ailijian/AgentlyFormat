@@ -8,6 +8,11 @@
 import requests
 import json
 import asyncio
+import os
+import sys
+
+# 强制使用本地开发版本
+sys.path.insert(0, 'E:/project/AgentlyFormat/src')
 
 # 导入AgentlyFormat相关模块
 from agently_format.types.models import ModelConfig, ModelType
@@ -206,18 +211,110 @@ async def agently_format_doubao_json_stream_example():
         print(f"\n\nAgentlyFormat JSON流式调用失败: {e}")
 
 
+async def agently_format_doubao_field_filtering_example():
+    """
+    使用AgentlyFormat框架调用豆包模型的字段选择性流式输出示例
+    演示如何只输出JSON中的特定字段
+    """
+    # 配置参数
+    model_name = "doubao-1-5-pro-32k-character-250715"
+    api_key = "4ed46be9-4eb4-45f1-8576-d2fc3d115026"
+    
+    # 创建模型配置
+    config = ModelConfig(
+        model_type=ModelType.DOUBAO,
+        model_name=model_name,
+        api_key=api_key
+    )
+    
+    # 创建豆包适配器
+    adapter = DoubaoAdapter(config)
+    
+    # 准备消息 - 要求模型输出JSON格式的结构化数据
+    messages = [
+        {
+            "role": "user",
+            "content": "请以JSON格式输出3个热门编程语言的信息，包含以下字段：name（语言名称）、year（发布年份）、creator（创建者）、description（简短描述）、popularity（流行度评分1-10）。请确保输出是有效的JSON格式。"
+        }
+    ]
+    
+    print("\n=== AgentlyFormat豆包字段选择性流式调用示例 ===")
+    print(f"模型: {model_name}")
+    print(f"提示: {messages[0]['content']}")
+    
+    # 示例1：只输出description字段
+    print("\n=== 示例1：只输出description字段 ===")
+    print("正在使用字段过滤流式调用...")
+    print("\n=== 过滤后的流式响应（仅description） ===")
+    
+    try:
+        async for chunk in adapter.chat_completion(
+            messages, 
+            stream=True, 
+            include_fields=["description"]
+        ):
+            if chunk:
+                print(chunk, end='', flush=True)
+        
+        print("\n\n=== 字段过滤调用完成 ===")
+        
+    except Exception as e:
+        print(f"\n\n字段过滤调用失败: {e}")
+    
+    # 示例2：输出多个指定字段
+    print("\n=== 示例2：输出name和description字段 ===")
+    print("正在使用多字段过滤流式调用...")
+    print("\n=== 过滤后的流式响应（name + description） ===")
+    
+    try:
+        async for chunk in adapter.chat_completion(
+            messages, 
+            stream=True, 
+            include_fields=["name", "description"]
+        ):
+            if chunk:
+                print(chunk, end='', flush=True)
+        
+        print("\n\n=== 多字段过滤调用完成 ===")
+        
+    except Exception as e:
+        print(f"\n\n多字段过滤调用失败: {e}")
+    
+    # 示例3：排除某些字段
+    print("\n=== 示例3：排除year和creator字段 ===")
+    print("正在使用字段排除流式调用...")
+    print("\n=== 过滤后的流式响应（排除year和creator） ===")
+    
+    try:
+        async for chunk in adapter.chat_completion(
+            messages, 
+            stream=True, 
+            exclude_fields=["year", "creator"]
+        ):
+            if chunk:
+                print(chunk, end='', flush=True)
+        
+        print("\n\n=== 字段排除调用完成 ===")
+        
+    except Exception as e:
+        print(f"\n\n字段排除调用失败: {e}")
+
+
 async def main_async():
     """
     异步主函数：演示豆包大模型调用
     """
     # 调用AgentlyFormat非流式示例
-    await agently_format_doubao_example()
+    # await agently_format_doubao_example()
     
     # 调用AgentlyFormat流式示例
-    await agently_format_doubao_stream_example()
+    # await agently_format_doubao_stream_example()
     
     # 调用AgentlyFormat JSON流式示例
-    await agently_format_doubao_json_stream_example()
+    # await agently_format_doubao_json_stream_example()
+    
+    # 调用AgentlyFormat字段选择性流式示例
+    await agently_format_doubao_field_filtering_example()
 
 
 def main():

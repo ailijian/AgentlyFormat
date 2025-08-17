@@ -33,6 +33,12 @@ from .path_builder import PathBuilder, PathStyle
 from .json_completer import JSONCompleter, CompletionStrategy
 from .diff_engine import StructuredDiffEngine, DiffMode, CoalescingConfig, create_diff_engine
 from .schemas import SchemaValidator, ValidationContext, ValidationLevel
+from ..exceptions import (
+    AgentlyFormatError, ParsingError, ValidationError, FieldFilteringError,
+    TimeoutError, BufferOverflowError, ErrorHandler, ErrorSeverity, ErrorCategory
+)
+from .performance_optimizer import PerformanceOptimizer
+from .memory_manager import MemoryManager
 
 
 @dataclass
@@ -82,20 +88,21 @@ class ChunkBuffer:
         """获取软裁剪后的内容
         
         尾部不完整的 token 会被延迟拼接，确保 JSON 解析的完整性。
+        智能分块：在JSON结构边界处分块，避免破坏语法结构。
         """
         content = self.get_content()
+        
+        # 如果内容为空，直接返回
+        if not content.strip():
+            return content
         
         # 如果在字符串中，保留到字符串结束
         if self.in_string:
             return content
         
-        # 检查括号平衡
-        if not self._is_balanced():
-            return content
-        
-        # 查找最后一个完整的 JSON token
-        trimmed = self._find_last_complete_token(content)
-        return trimmed
+        # 智能分块：查找安全的分块点
+        safe_content = self._find_safe_chunk_boundary(content)
+        return safe_content
     
     def _update_balance_stats(self, chunk: str):
         """更新括号/引号平衡统计"""
@@ -132,15 +139,36 @@ class ChunkBuffer:
             self.bracket_balance["'"] % 2 == 0
         )
     
-    def _find_last_complete_token(self, content: str) -> str:
-        """查找最后一个完整的 JSON token"""
-        # 简化实现：查找最后一个完整的对象或数组
+    def _find_safe_chunk_boundary(self, content: str) -> str:
+        """查找安全的分块边界
+        
+        智能分块策略：
+        1. 在完整的JSON对象/数组边界处分块
+        2. 避免在字符串中间分块
+        3. 确保括号平衡
+        4. 保留完整的键值对
+        """
+        if not content.strip():
+            return content
+            
+        # 查找最后一个安全的分块点
+        safe_pos = self._find_last_safe_position(content)
+        
+        # 如果找不到安全位置，返回完整内容而不是强制分块
+        # 这样可以避免破坏JSON结构，让后续的JSON解析器处理完整的内容
+        if safe_pos <= 0:
+            return content
+            
+        return content[:safe_pos]
+    
+    def _find_last_safe_position(self, content: str) -> int:
+        """查找最后一个安全的分块位置"""
         brace_count = 0
         bracket_count = 0
         in_string = False
         string_char = None
         escape_next = False
-        last_complete_pos = 0
+        last_safe_pos = 0
         
         for i, char in enumerate(content):
             if escape_next:
@@ -163,16 +191,51 @@ class ChunkBuffer:
                     brace_count += 1
                 elif char == '}':
                     brace_count -= 1
+                    # 完整对象结束，这是一个安全的分块点
                     if brace_count == 0 and bracket_count == 0:
-                        last_complete_pos = i + 1
+                        last_safe_pos = i + 1
                 elif char == '[':
                     bracket_count += 1
                 elif char == ']':
                     bracket_count -= 1
+                    # 完整数组结束，这是一个安全的分块点
                     if brace_count == 0 and bracket_count == 0:
-                        last_complete_pos = i + 1
+                        last_safe_pos = i + 1
+                elif char == ',' and brace_count <= 1 and bracket_count == 0:
+                    # 在对象的顶层逗号处，这也是一个相对安全的分块点
+                    last_safe_pos = i + 1
         
-        return content[:last_complete_pos] if last_complete_pos > 0 else content
+        return last_safe_pos
+    
+    def _is_in_string_at_position(self, content: str, pos: int) -> bool:
+        """检查指定位置是否在字符串内部"""
+        in_string = False
+        string_char = None
+        escape_next = False
+        
+        for i, char in enumerate(content[:pos + 1]):
+            if escape_next:
+                escape_next = False
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                continue
+            
+            if in_string:
+                if char == string_char:
+                    in_string = False
+                    string_char = None
+            else:
+                if char in ['"', "'"]:
+                    in_string = True
+                    string_char = char
+        
+        return in_string
+    
+    def _find_last_complete_token(self, content: str) -> str:
+        """查找最后一个完整的 JSON token（保留用于兼容性）"""
+        return self._find_safe_chunk_boundary(content)
     
     def clear(self):
         """清空缓冲区"""
@@ -261,6 +324,14 @@ class EnhancedStats:
     validation_errors: int = 0
     timeout_events: int = 0
     buffer_overflows: int = 0
+    json_decode_errors: int = 0
+    json5_fallback_success: int = 0
+    json5_fallback_errors: int = 0
+    completion_errors: int = 0
+    completion_success: int = 0
+    completion_failures: int = 0
+    event_generation_errors: int = 0
+    total_parse_failures: int = 0
     field_completion_times: Dict[str, datetime] = field(default_factory=dict)
     
     def record_first_field(self):
@@ -313,6 +384,7 @@ class ParsingState:
     start_time: datetime = field(default_factory=datetime.now)
     last_update_time: datetime = field(default_factory=datetime.now)
     errors: List[str] = field(default_factory=list)
+    parsing_errors: List[str] = field(default_factory=list)
     
     # 新增字段
     chunk_buffer: ChunkBuffer = field(default_factory=ChunkBuffer)
@@ -349,11 +421,279 @@ class ParsingState:
         return path_hash
 
 
+@dataclass
+class FieldFilter:
+    """字段过滤器配置
+    
+    支持路径匹配和字段选择性输出功能。
+    """
+    enabled: bool = False
+    include_paths: List[str] = field(default_factory=list)  # 包含的路径列表
+    exclude_paths: List[str] = field(default_factory=list)  # 排除的路径列表
+    mode: str = "include"  # "include" 或 "exclude"
+    exact_match: bool = False  # 是否精确匹配路径
+    performance_optimizer: Optional['PerformanceOptimizer'] = None  # 性能优化器引用
+    
+    def __post_init__(self):
+        """初始化后验证配置
+        
+        Raises:
+            FieldFilteringError: 当配置无效时
+        """
+        try:
+            self._validate_configuration()
+        except Exception as e:
+            if isinstance(e, FieldFilteringError):
+                raise
+            raise FieldFilteringError(
+                f"Failed to validate FieldFilter configuration: {str(e)}",
+                severity=ErrorSeverity.HIGH
+            ) from e
+    
+    def _validate_configuration(self):
+        """验证字段过滤器配置
+        
+        Raises:
+            FieldFilteringError: 当配置无效时
+        """
+        # 验证模式
+        if self.mode not in ["include", "exclude"]:
+            raise FieldFilteringError(
+                f"Invalid mode '{self.mode}'. Must be 'include' or 'exclude'",
+                severity=ErrorSeverity.HIGH
+            )
+        
+        # 验证路径列表
+        if not isinstance(self.include_paths, list):
+            raise FieldFilteringError(
+                "include_paths must be a list",
+                severity=ErrorSeverity.HIGH
+            )
+        
+        if not isinstance(self.exclude_paths, list):
+            raise FieldFilteringError(
+                "exclude_paths must be a list",
+                severity=ErrorSeverity.HIGH
+            )
+        
+        # 验证路径格式
+        for path in self.include_paths + self.exclude_paths:
+            if not isinstance(path, str):
+                raise FieldFilteringError(
+                    f"Path must be a string, got {type(path)}: {path}",
+                    severity=ErrorSeverity.HIGH
+                )
+            
+            if not path.strip():
+                raise FieldFilteringError(
+                    "Path cannot be empty or whitespace only",
+                    severity=ErrorSeverity.HIGH
+                )
+        
+        # 检查路径冲突
+        if self.include_paths and self.exclude_paths:
+            conflicts = set(self.include_paths) & set(self.exclude_paths)
+            if conflicts:
+                raise FieldFilteringError(
+                    f"Paths cannot be both included and excluded: {conflicts}",
+                    severity=ErrorSeverity.HIGH
+                )
+        
+        # 如果启用但没有配置路径，发出警告
+        if self.enabled and not self.include_paths and not self.exclude_paths:
+            # 这里可以记录警告日志，但不抛出异常
+            pass
+    
+    def should_include_path(self, path: str) -> bool:
+        """判断路径是否应该包含在输出中
+        
+        Args:
+            path: 要检查的路径
+            
+        Returns:
+            bool: 是否应该包含
+            
+        Raises:
+            FieldFilteringError: 当路径匹配过程中发生错误时
+        """
+        try:
+            # 验证输入参数
+            if not isinstance(path, str):
+                raise FieldFilteringError(
+                    f"Path must be a string, got {type(path)}: {path}",
+                    field_path=str(path),
+                    severity=ErrorSeverity.MEDIUM
+                )
+            
+            if not self.enabled:
+                return True
+            
+            # 支持同时使用include和exclude的组合过滤逻辑
+            # 1. 如果有include_paths，首先检查路径是否在包含列表中
+            if self.include_paths:
+                if not self._path_matches(path, self.include_paths):
+                    return False  # 不在包含列表中，直接排除
+            
+            # 2. 如果有exclude_paths，检查路径是否在排除列表中
+            if self.exclude_paths:
+                if self._path_matches(path, self.exclude_paths):
+                    return False  # 在排除列表中，排除该路径
+            
+            # 3. 如果既没有include_paths也没有exclude_paths，默认包含
+            if not self.include_paths and not self.exclude_paths:
+                return True
+            
+            # 4. 通过了所有检查，包含该路径
+            return True
+            
+        except FieldFilteringError:
+            raise
+        except Exception as e:
+            raise FieldFilteringError(
+                f"Error during path filtering for '{path}': {str(e)}",
+                field_path=path,
+                severity=ErrorSeverity.MEDIUM
+            ) from e
+    
+    def _path_matches(self, path: str, patterns: List[str]) -> bool:
+        """检查路径是否匹配任一模式
+        
+        参考agently的实现，改进路径匹配逻辑：
+        1. 支持精确字段名匹配
+        2. 支持数组索引后的字段匹配
+        3. 支持嵌套路径匹配
+        4. 支持通配符匹配
+        
+        Args:
+            path: 要检查的路径
+            patterns: 模式列表
+            
+        Returns:
+            bool: 是否匹配
+            
+        Raises:
+            FieldFilteringError: 当路径匹配过程中发生错误时
+        """
+        # 直接实现路径匹配逻辑，不使用性能优化器缓存
+        # 因为性能优化器的缓存逻辑不支持同时处理include和exclude模式
+        try:
+            import re
+            
+            for pattern in patterns:
+                try:
+                    if self.exact_match:
+                        if path == pattern:
+                            return True
+                    else:
+                        # 1. 精确匹配完整路径
+                        if path == pattern:
+                            return True
+                        
+                        # 2. 通配符匹配 - 优先处理
+                        if '*' in pattern:
+                            if self._wildcard_match(path, pattern):
+                                return True
+                            # 特殊处理：对于 xxx.* 模式，也匹配 xxx 本身
+                            if pattern.endswith('.*') and path == pattern[:-2]:
+                                return True
+                        
+                        # 3. 字段名匹配：检查路径末尾是否为指定字段名
+                        # 支持 .fieldname 和 [index].fieldname 格式
+                        if path.endswith('.' + pattern):
+                            return True
+                        
+                        # 4. 数组索引后的字段名匹配
+                        # 匹配 xxx[数字].pattern 的格式，如 languages[0].description
+                        if re.search(r'\[\d+\]\.' + re.escape(pattern) + r'$', path):
+                            return True
+                        
+                        # 5. 根级数组元素字段匹配
+                        # 匹配 pattern[数字].xxx 的格式，如 languages[0] 匹配 languages
+                        if re.search(r'^' + re.escape(pattern) + r'\[\d+\]', path):
+                            return True
+                        
+                        # 6. 嵌套字段匹配
+                        # 如果pattern包含点，进行更精确的路径匹配
+                        if '.' in pattern and '*' not in pattern:
+                            # 支持部分路径匹配，如 languages.description 匹配 languages[0].description
+                            pattern_parts = pattern.split('.')
+                            path_normalized = re.sub(r'\[\d+\]', '', path)  # 移除数组索引
+                            if path_normalized == '.'.join(pattern_parts):
+                                return True
+                        
+                        # 7. 敏感信息字段匹配 - 特别处理包含敏感信息的字段名
+                        # 检查路径中是否包含敏感信息模式
+                        if pattern in path:
+                            # 检查是否为完整的字段名匹配
+                            # 例如：secret123 应该匹配 data.secret123 或 users[0].secret123
+                            if ('.' + pattern in path or 
+                                path.startswith(pattern) or 
+                                ('[' in path and '].' + pattern in path)):
+                                return True
+                            
+                except re.error as e:
+                    raise FieldFilteringError(
+                        f"Invalid regex pattern '{pattern}' for path '{path}': {str(e)}",
+                        field_path=path,
+                        severity=ErrorSeverity.MEDIUM
+                    ) from e
+                except Exception as e:
+                    raise FieldFilteringError(
+                        f"Error matching pattern '{pattern}' against path '{path}': {str(e)}",
+                        field_path=path,
+                        severity=ErrorSeverity.LOW
+                    ) from e
+                    
+            return False
+            
+        except FieldFilteringError:
+            raise
+        except Exception as e:
+            raise FieldFilteringError(
+                f"Error during path matching for '{path}': {str(e)}",
+                field_path=path,
+                severity=ErrorSeverity.MEDIUM
+            ) from e
+    
+    def _wildcard_match(self, path: str, pattern: str) -> bool:
+        """简单的通配符匹配
+        
+        Args:
+            path: 路径
+            pattern: 模式（支持 * 通配符）
+            
+        Returns:
+            bool: 是否匹配
+            
+        Raises:
+            FieldFilteringError: 当通配符匹配过程中发生错误时
+        """
+        try:
+            import re
+            # 将通配符转换为正则表达式
+            regex_pattern = pattern.replace("*", ".*")
+            return bool(re.match(f"^{regex_pattern}$", path))
+            
+        except re.error as e:
+            raise FieldFilteringError(
+                f"Invalid wildcard pattern '{pattern}' for path '{path}': {str(e)}",
+                field_path=path,
+                severity=ErrorSeverity.MEDIUM
+            ) from e
+        except Exception as e:
+            raise FieldFilteringError(
+                f"Error during wildcard matching for pattern '{pattern}' and path '{path}': {str(e)}",
+                field_path=path,
+                severity=ErrorSeverity.LOW
+            ) from e
+
+
 class StreamingParser:
     """流式JSON解析器
     
     异步逐块解析流式JSON数据，维护解析状态，
     并为每个字段在结构构建过程中发出增量和完成事件。
+    支持字段过滤功能，可以选择性输出特定字段。
     """
     
     def __init__(
@@ -373,7 +713,9 @@ class StreamingParser:
         schema: Optional[Dict[str, Any]] = None,
         adaptive_timeout_enabled: bool = True,
         max_timeout: float = 30.0,
-        backoff_factor: float = 1.5
+        backoff_factor: float = 1.5,
+        # 字段过滤参数
+        field_filter: Optional[FieldFilter] = None
     ):
         """初始化流式解析器
         
@@ -406,6 +748,29 @@ class StreamingParser:
         self.adaptive_timeout_enabled = adaptive_timeout_enabled
         self.max_timeout = max_timeout
         self.backoff_factor = backoff_factor
+        
+        # 字段过滤器配置
+        self.field_filter = field_filter or FieldFilter()
+        
+        # 性能优化器初始化
+        self.performance_optimizer = PerformanceOptimizer(
+            enable_string_optimization=True,
+            enable_path_optimization=True,
+            enable_memory_management=True,
+            max_cache_size=1000
+        )
+        
+        # 将性能优化器传递给字段过滤器
+        self.field_filter.performance_optimizer = self.performance_optimizer
+        
+        # 内存管理器初始化
+        self.memory_manager = MemoryManager(
+            max_sessions=1000,
+            session_timeout=3600,  # 1小时
+            cleanup_interval=300,  # 5分钟
+            memory_threshold_mb=500.0,
+            enable_auto_gc=True
+        )
         
         # 组件初始化
         self.path_builder = PathBuilder(path_style)
@@ -489,6 +854,10 @@ class StreamingParser:
             )
         
         self.parsing_states[session_id] = state
+        
+        # 注册会话到内存管理器
+        self.memory_manager.register_session(session_id, state)
+        
         self.stats["total_sessions"] += 1
         self.stats["active_sessions"] += 1
         return session_id
@@ -533,105 +902,233 @@ class StreamingParser:
                 # 记录回调错误，但不中断处理
                 print(f"Event callback error: {e}")
     
-    async def parse_chunk(self, chunk: str, session_id: str, is_final: bool = False) -> List[StreamingEvent]:
+    async def parse_chunk(self, session_id: str, chunk: str, is_final: bool = False) -> List[StreamingEvent]:
         """解析JSON块
         
         Args:
-            chunk: JSON块
             session_id: 会话ID
+            chunk: JSON块
             is_final: 是否为最终块
             
         Returns:
             List[StreamingEvent]: 生成的事件列表
+            
+        Raises:
+            ParsingError: 当解析过程中发生不可恢复的错误时
+            ValidationError: 当输入验证失败时
+            BufferOverflowError: 当缓冲区溢出时
         """
-        if session_id not in self.parsing_states:
-            raise ValueError(f"Session {session_id} not found")
-        
-        state = self.parsing_states[session_id]
-        state.total_chunks += 1
-        state.enhanced_stats.total_chunks += 1
-        state.update_timestamp()
-        
-        # 记录块接收时间（用于自适应超时）
-        if self.adaptive_timeout_enabled:
-            state.adaptive_timeout.on_chunk_received()
-        
-        events = []
-        start_time = time.time()
+        # 初始化错误处理器
+        error_handler = ErrorHandler()
         
         try:
-            # 添加块到缓冲区
-            buffered_content = state.chunk_buffer.add_chunk(chunk)
-            
-            # 检查缓冲区是否溢出
-            if state.chunk_buffer.total_size >= state.chunk_buffer.max_size:
-                self.stats["total_buffer_overflows"] += 1
-            
-            # 获取软裁剪后的内容进行解析
-            content_to_parse = (
-                state.chunk_buffer.get_soft_trimmed_content() 
-                if not is_final 
-                else buffered_content
-            )
-            
-            # 尝试解析当前内容
-            parsed_data = await self._parse_json_chunk(content_to_parse, state)
-            
-            if parsed_data is not None:
-                # 记录第一个字段时间
-                if not state.enhanced_stats.first_field_time and parsed_data:
-                    state.enhanced_stats.record_first_field()
-                
-                # 比较并生成事件
-                chunk_events = await self._compare_and_generate_events(state, parsed_data)
-                events.extend(chunk_events)
-                
-                # Schema 验证（如果启用）
-                if self.enable_schema_validation and self.schema_validator and state.validation_context:
-                    validation_events = await self._validate_data(state, parsed_data)
-                    events.extend(validation_events)
-                
-                # 更新状态
-                state.previous_data = copy.deepcopy(state.current_data)
-                state.current_data = parsed_data
-                state.processed_chunks += 1
-                state.enhanced_stats.processed_chunks += 1
-            else:
-                # 解析失败，处理错误
-                error_events = await self._handle_parsing_error(
-                    state, session_id, content_to_parse, chunk, 
-                    start_time, is_final, "Failed to parse JSON chunk"
+            # 验证输入参数
+            if not isinstance(session_id, str) or not session_id:
+                raise ValidationError(
+                    "Session ID must be a non-empty string",
+                    severity=ErrorSeverity.HIGH
                 )
-                events.extend(error_events)
             
-            # 更新统计信息
-            self.stats["total_chunks_processed"] += 1
+            if not isinstance(chunk, str):
+                raise ValidationError(
+                    f"Chunk must be a string, got {type(chunk)}",
+                    severity=ErrorSeverity.HIGH
+                )
             
+            if session_id not in self.parsing_states:
+                raise ValidationError(
+                    f"Session {session_id} not found",
+                    severity=ErrorSeverity.HIGH
+                )
+            
+            state = self.parsing_states[session_id]
+            state.total_chunks += 1
+            state.enhanced_stats.total_chunks += 1
+            state.update_timestamp()
+            
+            # 记录块接收时间（用于自适应超时）
+            if self.adaptive_timeout_enabled:
+                state.adaptive_timeout.on_chunk_received()
+            
+            events = []
+            start_time = time.time()
+            
+            try:
+                # 添加块到缓冲区
+                buffered_content = state.chunk_buffer.add_chunk(chunk)
+                
+                # 检查缓冲区是否溢出
+                if state.chunk_buffer.total_size >= state.chunk_buffer.max_size:
+                    self.stats["total_buffer_overflows"] += 1
+                    raise BufferOverflowError(
+                        f"Buffer overflow: size {state.chunk_buffer.total_size} exceeds limit {state.chunk_buffer.max_size}",
+                        buffer_size=state.chunk_buffer.total_size,
+                        max_size=state.chunk_buffer.max_size,
+                        severity=ErrorSeverity.HIGH
+                    )
+                
+                # 获取软裁剪后的内容进行解析
+                content_to_parse = (
+                    state.chunk_buffer.get_soft_trimmed_content() 
+                    if not is_final 
+                    else buffered_content
+                )
+                
+                # 尝试解析当前内容
+                parsed_data = await self._parse_json_chunk(content_to_parse, state)
+                
+                if parsed_data is not None:
+                    # 记录第一个字段时间
+                    if not state.enhanced_stats.first_field_time and parsed_data:
+                        state.enhanced_stats.record_first_field()
+                    
+                    # 比较并生成事件
+                    chunk_events = await self._compare_and_generate_events(state, parsed_data)
+                    events.extend(chunk_events)
+                    
+                    # Schema 验证（如果启用）
+                    if self.enable_schema_validation and self.schema_validator and state.validation_context:
+                        validation_events = await self._validate_data(state, parsed_data)
+                        events.extend(validation_events)
+                    
+                    # 更新状态
+                    state.previous_data = copy.deepcopy(state.current_data)
+                    state.current_data = parsed_data
+                    state.processed_chunks += 1
+                    state.enhanced_stats.processed_chunks += 1
+                else:
+                    # 解析失败，尝试错误恢复
+                    try:
+                        recovery_result = error_handler.attempt_recovery(
+                            ParsingError(
+                                "Failed to parse JSON chunk",
+                                json_content=content_to_parse[:100],  # 只记录前100个字符
+                                severity=ErrorSeverity.MEDIUM
+                            )
+                        )
+                        
+                        if recovery_result is not None:
+                            # 恢复成功，继续处理
+                            # recovery_result可能包含恢复的数据
+                            pass
+                        else:
+                            # 恢复失败，生成错误事件
+                            error_events = await self._handle_parsing_error(
+                                state, session_id, content_to_parse, chunk, 
+                                start_time, is_final, "Failed to parse JSON chunk"
+                            )
+                            events.extend(error_events)
+                    except Exception:
+                        # 恢复过程中出现异常，直接生成错误事件
+                        error_events = await self._handle_parsing_error(
+                            state, session_id, content_to_parse, chunk, 
+                            start_time, is_final, "Failed to parse JSON chunk"
+                        )
+                        events.extend(error_events)
+                
+                # 更新统计信息
+                self.stats["total_chunks_processed"] += 1
+                
+            except (BufferOverflowError, ValidationError, ParsingError) as e:
+                # 记录特定类型的错误到会话状态
+                error_message = f"Specific error in chunk processing: {str(e)}"
+                if session_id in self.parsing_states:
+                    state = self.parsing_states[session_id]
+                    state.errors.append(error_message)
+                else:
+                    # 对于ValidationError "Session not found"，创建临时状态
+                    temp_state = ParsingState(session_id)
+                    temp_state.errors.append(error_message)
+                    self.parsing_states[session_id] = temp_state
+                raise
+            except Exception as e:
+                # 尝试错误恢复
+                try:
+                    recovery_result = error_handler.attempt_recovery(
+                        ParsingError(
+                            f"Unexpected error during chunk processing: {str(e)}",
+                            json_content=chunk[:100],  # 只记录前100个字符
+                            severity=ErrorSeverity.HIGH
+                        )
+                    )
+                    
+                    if recovery_result is not None:
+                        # 恢复成功，继续处理
+                        pass
+                    else:
+                        # 恢复失败，重新抛出异常
+                        raise ParsingError(
+                            f"Unrecoverable error during chunk processing: {str(e)}",
+                            json_content=chunk[:100],
+                            severity=ErrorSeverity.HIGH
+                        ) from e
+                except Exception:
+                    # 恢复过程中出现异常，重新抛出原异常
+                    raise ParsingError(
+                        f"Unrecoverable error during chunk processing: {str(e)}",
+                        json_content=chunk[:100],
+                        severity=ErrorSeverity.HIGH
+                    ) from e
+        
         except Exception as e:
-            # 处理异常错误
-            error_events = await self._handle_parsing_error(
-                state, session_id, content_to_parse, chunk, 
-                start_time, is_final, str(e)
+            # 处理最外层异常
+            error_message = f"Unexpected error in chunk processing: {str(e)}"
+            error_event = create_error_event(
+                path="",
+                error_type="processing_error",
+                error_message=error_message,
+                session_id=session_id,
+                sequence_number=0,  # 使用默认序列号
+                metadata={"error_type": type(e).__name__}
             )
-            events.extend(error_events)
+            events = [error_event]
+            
+            # 将错误记录到会话状态中
+            if session_id in self.parsing_states:
+                state = self.parsing_states[session_id]
+                state.errors.append(error_message)
+            else:
+                # 如果会话不存在，创建临时状态记录错误
+                # 这种情况通常发生在ValidationError "Session not found"时
+                temp_state = ParsingState(session_id)
+                temp_state.errors.append(error_message)
+                self.parsing_states[session_id] = temp_state
         
         # 检查超时
-        if self.adaptive_timeout_enabled and state.adaptive_timeout.is_timeout():
-            state.adaptive_timeout.on_timeout()
-            self.stats["total_timeouts"] += 1
-            
-            timeout_event = create_error_event(
+        try:
+            if (self.adaptive_timeout_enabled and 
+                session_id in self.parsing_states and 
+                self.parsing_states[session_id].adaptive_timeout.is_timeout()):
+                state = self.parsing_states[session_id]
+                state.adaptive_timeout.on_timeout()
+                self.stats["total_timeouts"] += 1
+                
+                timeout_event = create_error_event(
+                    path="",
+                    error_type="timeout_error",
+                    error_message=f"Chunk processing timeout after {state.adaptive_timeout.current_timeout}s",
+                    session_id=session_id,
+                    sequence_number=state.increment_sequence(),
+                    metadata={
+                        "timeout_duration": state.adaptive_timeout.current_timeout,
+                        "consecutive_timeouts": state.adaptive_timeout.consecutive_timeouts
+                    }
+                )
+                if 'events' not in locals():
+                    events = []
+                events.append(timeout_event)
+        except Exception as e:
+            # 超时检查错误
+            error_event = create_error_event(
                 path="",
-                error_type="timeout_error",
-                error_message=f"Chunk processing timeout after {state.adaptive_timeout.current_timeout}s",
+                error_type="timeout_check_error",
+                error_message=f"Error during timeout check: {str(e)}",
                 session_id=session_id,
-                sequence_number=state.increment_sequence(),
-                metadata={
-                    "timeout_duration": state.adaptive_timeout.current_timeout,
-                    "consecutive_timeouts": state.adaptive_timeout.consecutive_timeouts
-                }
+                sequence_number=0
             )
-            events.append(timeout_event)
+            if 'events' not in locals():
+                events = []
+            events.append(error_event)
         
         # 发出所有事件
         for event in events:
@@ -842,6 +1339,28 @@ class StreamingParser:
                 pass  # 修复失败，继续处理原始错误
         
         if not repair_attempted:
+            # 获取详细的异常信息
+            import traceback
+            import sys
+            exception_details = {
+                "chunk_size": len(chunk),
+                "buffer_size": state.chunk_buffer.total_size,
+                "processing_time_ms": (time.time() - start_time) * 1000,
+                "is_final": is_final,
+                "content_preview": content_to_parse[:100] if content_to_parse else ""
+            }
+            
+            # 如果有当前异常，添加详细信息
+            current_exception = sys.exc_info()
+            if current_exception[0] is not None:
+                exception_details.update({
+                    "exception_type": current_exception[0].__name__,
+                    "exception_message": str(current_exception[1]),
+                    "exception_traceback": traceback.format_exception(*current_exception)
+                })
+                print(f"[DEBUG] 捕获到异常: {current_exception[0].__name__}: {current_exception[1]}")
+                print(f"[DEBUG] 异常堆栈: {''.join(traceback.format_exception(*current_exception))}")
+            
             # 生成错误事件
             error_event = create_error_event(
                 path="",
@@ -849,13 +1368,7 @@ class StreamingParser:
                 error_message=error_message,
                 session_id=session_id,
                 sequence_number=state.increment_sequence(),
-                metadata={
-                    "chunk_size": len(chunk),
-                    "buffer_size": state.chunk_buffer.total_size,
-                    "processing_time_ms": (time.time() - start_time) * 1000,
-                    "is_final": is_final,
-                    "content_preview": content_to_parse[:100] if content_to_parse else ""
-                }
+                metadata=exception_details
             )
             events.append(error_event)
             state.errors.append(error_message)
@@ -871,33 +1384,85 @@ class StreamingParser:
             
         Returns:
             Optional[Dict[str, Any]]: 解析结果
+            
+        Raises:
+            ParsingError: 当解析过程中发生严重错误时
         """
-        if not chunk.strip():
-            return None
-        
         try:
-            # 首先尝试直接解析
-            return json.loads(chunk)
-        except json.JSONDecodeError:
-            pass
-        
-        try:
-            # 尝试使用json5解析（支持更宽松的语法）
-            return json5.loads(chunk)
-        except Exception:
-            pass
-        
-        # 如果启用了补全，尝试补全后解析
-        if self.json_completer:
+            # 验证输入参数
+            if not isinstance(chunk, str):
+                raise ParsingError(
+                    f"Chunk must be a string, got {type(chunk)}",
+                    json_content=str(chunk)[:100],
+                    severity=ErrorSeverity.HIGH
+                )
+            
+            if not chunk.strip():
+                return None
+            
+            # 检查块大小是否合理
+            if len(chunk) > 10 * 1024 * 1024:  # 10MB限制
+                raise ParsingError(
+                    f"Chunk size too large: {len(chunk)} bytes",
+                    json_content=chunk[:100],
+                    severity=ErrorSeverity.HIGH
+                )
+            
             try:
-                completion_result = self.json_completer.complete(chunk)
-                if completion_result.is_valid:
-                    return json.loads(completion_result.completed_json)
-            except Exception:
-                pass
-        
-        # 如果都失败了，返回None
-        return None
+                # 首先尝试直接解析
+                return json.loads(chunk)
+            except json.JSONDecodeError as e:
+                # 记录JSON解析错误
+                state.enhanced_stats.json_decode_errors += 1
+                
+                # 如果是严重的语法错误，记录详细信息
+                if hasattr(e, 'lineno') and hasattr(e, 'colno'):
+                    error_context = {
+                        'line': e.lineno,
+                        'column': e.colno,
+                        'position': getattr(e, 'pos', None),
+                        'error_msg': str(e)
+                    }
+                    state.parsing_errors.append(error_context)
+            
+            try:
+                # 尝试使用json5解析（支持更宽松的语法）
+                import json5
+                result = json5.loads(chunk)
+                state.enhanced_stats.json5_fallback_success += 1
+                return result
+            except Exception as e:
+                # 记录json5解析失败
+                state.enhanced_stats.json5_fallback_errors += 1
+            
+            # 如果启用了补全，尝试补全后解析
+            if self.json_completer:
+                try:
+                    completion_result = self.json_completer.complete(chunk)
+                    if completion_result.is_valid:
+                        result = json.loads(completion_result.completed_json)
+                        state.enhanced_stats.completion_success += 1
+                        return result
+                    else:
+                        state.enhanced_stats.completion_failures += 1
+                except Exception as e:
+                    state.enhanced_stats.completion_errors += 1
+                    # 补全器错误不应该阻止整个解析过程
+                    pass
+            
+            # 所有解析方法都失败了
+            state.enhanced_stats.total_parse_failures += 1
+            return None
+            
+        except ParsingError:
+            raise
+        except Exception as e:
+            # 捕获所有其他异常
+            raise ParsingError(
+                f"Unexpected error during JSON parsing: {str(e)}",
+                json_content=chunk[:100] if isinstance(chunk, str) else str(chunk)[:100],
+                severity=ErrorSeverity.HIGH
+            ) from e
     
     async def _compare_and_generate_events(
         self, 
@@ -916,27 +1481,76 @@ class StreamingParser:
             
         Returns:
             List[StreamingEvent]: 事件列表
+            
+        Raises:
+            ParsingError: 当事件生成过程中发生错误时
         """
-        events = []
-        
-        # 处理纯文本流式输出
-        if isinstance(new_data, str):
-            return await self._handle_text_streaming(state, new_data)
-        
-        # 处理JSON结构化流式输出
-        if isinstance(new_data, dict):
-            return await self._handle_json_streaming(state, new_data)
-        
-        # 其他类型直接使用递归比较
-        await self._traverse_and_compare(
-            events=events,
-            current_data=new_data,
-            previous_data=state.current_data,
-            path="",
-            state=state
-        )
-        
-        return events
+        try:
+            # 验证输入参数
+            if state is None:
+                raise ParsingError(
+                    "Parsing state cannot be None",
+                    severity=ErrorSeverity.HIGH
+                )
+            
+            events = []
+            
+            try:
+                # 处理纯文本流式输出
+                if isinstance(new_data, str):
+                    return await self._handle_text_streaming(state, new_data)
+                
+                # 处理JSON结构化流式输出
+                if isinstance(new_data, dict):
+                    return await self._handle_json_streaming(state, new_data)
+                
+                # 处理None或其他类型
+                if new_data is None:
+                    # JSON解析失败，不生成任何事件
+                    return []
+                
+                # 其他类型直接使用递归比较
+                await self._traverse_and_compare(
+                    events=events,
+                    current_data=new_data,
+                    previous_data=state.current_data,
+                    path="",
+                    state=state
+                )
+                
+                return events
+                
+            except Exception as e:
+                # 记录事件生成错误
+                state.enhanced_stats.event_generation_errors += 1
+                
+                # 尝试生成错误事件
+                try:
+                    error_event = create_error_event(
+                        path="",
+                        error_type="event_generation_error",
+                        error_message=f"Failed to generate events: {str(e)}",
+                        session_id=state.session_id,
+                        sequence_number=state.increment_sequence(),
+                        metadata={
+                            "data_type": type(new_data).__name__,
+                            "data_preview": str(new_data)[:100] if new_data is not None else "None"
+                        }
+                    )
+                    return [error_event]
+                except Exception:
+                    # 如果连错误事件都无法生成，返回空列表
+                    return []
+                
+        except ParsingError:
+            raise
+        except Exception as e:
+            # 捕获所有其他异常
+            raise ParsingError(
+                f"Unexpected error during event generation: {str(e)}",
+                json_content=str(new_data)[:100] if new_data is not None else "None",
+                severity=ErrorSeverity.HIGH
+            ) from e
     
     async def _handle_text_streaming(self, state: ParsingState, new_text: str) -> List[StreamingEvent]:
         """处理纯文本流式输出
@@ -1004,13 +1618,14 @@ class StreamingParser:
         path: str,
         state: ParsingState
     ) -> None:
-        """递归遍历并比较数据，生成增量事件 - 参考agently项目实现
+        """递归遍历并比较数据，生成增量事件 - 重新设计的字段级流式解析
         
-        这是核心的比较逻辑，采用agently项目的稳定算法：
-        1. 递归遍历当前数据结构
-        2. 与之前的数据进行逐层比较
-        3. 生成准确的增量(delta)和完成(done)事件
-        4. 确保输出顺序的稳定性
+        参考agently项目的实现，重新设计字段过滤逻辑：
+        1. 在递归遍历过程中进行字段过滤
+        2. 确保只有匹配的字段才生成事件
+        3. 支持真正的字段级流式输出
+        4. 保持事件的实时性和连续性
+        5. 正确处理对象边界和字段分离
         
         Args:
             events: 事件列表，用于收集生成的事件
@@ -1021,76 +1636,75 @@ class StreamingParser:
         """
         # 处理字符串类型 - 最常见的流式更新场景
         if isinstance(current_data, str):
-            if not isinstance(previous_data, str):
-                # 新字符串字段
-                delta_event = create_delta_event(
-                    path=path,
-                    value=current_data,
-                    delta_value=current_data,
-                    session_id=state.session_id,
-                    sequence_number=state.increment_sequence(),
-                    previous_value=previous_data,
-                    is_partial=True
-                )
-                events.append(delta_event)
-            elif current_data != previous_data:
-                # 字符串更新 - 计算增量部分
-                if current_data.startswith(previous_data):
-                    # 字符串追加
-                    delta_value = current_data[len(previous_data):]
-                else:
-                    # 字符串替换
-                    delta_value = current_data
-                
-                delta_event = create_delta_event(
-                    path=path,
-                    value=current_data,
-                    delta_value=delta_value,
-                    session_id=state.session_id,
-                    sequence_number=state.increment_sequence(),
-                    previous_value=previous_data,
-                    is_partial=True
-                )
-                events.append(delta_event)
-            
-            # 检查字符串是否完成
-            if self._should_mark_field_complete(path, current_data, state):
-                if path not in state.completed_fields:
-                    done_event = create_done_event(
+            # 检查字段过滤 - 只有匹配的字段才生成事件
+            if self._should_include_field(path):
+                if not isinstance(previous_data, str):
+                    # 新字符串字段 - 生成delta事件
+                    delta_event = create_delta_event(
                         path=path,
-                        final_value=current_data,
+                        value=current_data,
+                        delta_value=current_data,
                         session_id=state.session_id,
                         sequence_number=state.increment_sequence(),
-                        validation_passed=True
+                        previous_value=previous_data,
+                        is_partial=self._is_value_partial(current_data)
                     )
-                    events.append(done_event)
-                    state.completed_fields.add(path)
+                    events.append(delta_event)
+                elif current_data != previous_data:
+                    # 字符串更新 - 计算真正的增量部分
+                    delta_value = self._calculate_string_delta(previous_data, current_data)
+                    
+                    delta_event = create_delta_event(
+                        path=path,
+                        value=current_data,
+                        delta_value=delta_value,
+                        session_id=state.session_id,
+                        sequence_number=state.increment_sequence(),
+                        previous_value=previous_data,
+                        is_partial=self._is_value_partial(current_data)
+                    )
+                    events.append(delta_event)
+                
+                # 检查字符串是否完成
+                if self._should_mark_field_complete(path, current_data, state):
+                    if path not in state.completed_fields:
+                        done_event = create_done_event(
+                            path=path,
+                            final_value=current_data,
+                            session_id=state.session_id,
+                            sequence_number=state.increment_sequence(),
+                            validation_passed=True
+                        )
+                        events.append(done_event)
+                        state.completed_fields.add(path)
         
         # 处理基本类型 (int, float, bool, None)
         elif isinstance(current_data, (int, float, bool, type(None))):
-            if current_data != previous_data:
-                delta_event = create_delta_event(
-                    path=path,
-                    value=current_data,
-                    delta_value=current_data,
-                    session_id=state.session_id,
-                    sequence_number=state.increment_sequence(),
-                    previous_value=previous_data,
-                    is_partial=False
-                )
-                events.append(delta_event)
-                
-                # 基本类型通常立即完成
-                if path not in state.completed_fields:
-                    done_event = create_done_event(
+            # 检查字段过滤 - 只有匹配的字段才生成事件
+            if self._should_include_field(path):
+                if current_data != previous_data:
+                    delta_event = create_delta_event(
                         path=path,
-                        final_value=current_data,
+                        value=current_data,
+                        delta_value=current_data,
                         session_id=state.session_id,
                         sequence_number=state.increment_sequence(),
-                        validation_passed=True
+                        previous_value=previous_data,
+                        is_partial=False
                     )
-                    events.append(done_event)
-                    state.completed_fields.add(path)
+                    events.append(delta_event)
+                    
+                    # 基本类型通常立即完成
+                    if path not in state.completed_fields:
+                        done_event = create_done_event(
+                            path=path,
+                            final_value=current_data,
+                            session_id=state.session_id,
+                            sequence_number=state.increment_sequence(),
+                            validation_passed=True
+                        )
+                        events.append(done_event)
+                        state.completed_fields.add(path)
         
         # 处理字典类型
         elif isinstance(current_data, dict):
@@ -1101,14 +1715,16 @@ class StreamingParser:
                 new_path = f"{path}.{key}" if path else key
                 previous_value = previous_dict.get(key)
                 
-                # 递归处理子项
-                await self._traverse_and_compare(
-                    events=events,
-                    current_data=value,
-                    previous_data=previous_value,
-                    path=new_path,
-                    state=state
-                )
+                # 检查字段过滤 - 如果当前路径或其子路径可能被包含，才进行递归处理
+                if self._should_process_path_branch(new_path):
+                    # 递归处理子项
+                    await self._traverse_and_compare(
+                        events=events,
+                        current_data=value,
+                        previous_data=previous_value,
+                        path=new_path,
+                        state=state
+                    )
         
         # 处理列表类型
         elif isinstance(current_data, list):
@@ -1119,14 +1735,90 @@ class StreamingParser:
                 new_path = f"{path}[{i}]"
                 previous_value = previous_list[i] if i < len(previous_list) else None
                 
-                # 递归处理列表项
-                await self._traverse_and_compare(
-                    events=events,
-                    current_data=value,
-                    previous_data=previous_value,
-                    path=new_path,
-                    state=state
-                )
+                # 检查字段过滤 - 如果当前路径或其子路径可能被包含，才进行递归处理
+                if self._should_process_path_branch(new_path):
+                    # 递归处理列表项
+                    await self._traverse_and_compare(
+                        events=events,
+                        current_data=value,
+                        previous_data=previous_value,
+                        path=new_path,
+                        state=state
+                    )
+    
+    def _should_include_field(self, path: str) -> bool:
+        """判断字段是否应该包含在输出中 - 精确的字段过滤逻辑
+        
+        Args:
+            path: 字段路径
+            
+        Returns:
+            bool: 是否应该包含该字段
+        """
+        if not self.field_filter.enabled:
+            return True
+        
+        return self.field_filter.should_include_path(path)
+    
+    def _should_process_path_branch(self, path: str) -> bool:
+        """判断是否应该处理某个路径分支 - 修复的分支处理逻辑
+        
+        参考agently的实现，修复分支处理逻辑：
+        1. include模式：只处理可能包含目标字段的分支
+        2. exclude模式：处理所有分支，在字段级别进行排除
+        3. 避免过早剪枝导致遗漏有效字段
+        
+        Args:
+            path: 要检查的路径
+            
+        Returns:
+            bool: 是否应该处理该路径分支
+        """
+        if not self.field_filter.enabled:
+            return True
+        
+        # 根路径始终处理，避免过早剪枝
+        if not path:
+            return True
+        
+        if self.field_filter.mode == "include":
+            # include模式：检查是否有包含路径可能在此分支下
+            for include_path in self.field_filter.include_paths:
+                # 1. 当前路径是目标路径的前缀（需要继续深入）
+                if include_path.startswith(path + ".") or include_path.startswith(path + "["):
+                    return True
+                # 2. 当前路径包含目标字段名（可能匹配）
+                if path.endswith("." + include_path) or path.endswith("[" + include_path + "]"):
+                    return True
+                # 3. 目标路径是当前路径的前缀（当前路径在目标路径下）
+                if path.startswith(include_path + ".") or path.startswith(include_path + "["):
+                    return True
+                # 4. 精确匹配
+                if path == include_path:
+                    return True
+                # 5. 简单字段名匹配（处理顶级字段）
+                if path == include_path or include_path == path.split(".")[-1]:
+                    return True
+            return False
+        elif self.field_filter.mode == "exclude":
+            # exclude模式：处理所有分支，让字段级过滤来决定是否输出
+            # 这是关键修复：不在分支级别进行排除，避免遗漏其他字段
+            return True
+        
+        return True
+    
+    def _calculate_string_delta(self, old_value: str, new_value: str) -> str:
+        """计算字符串的增量部分 - 使用性能优化器的缓存功能
+        
+        Args:
+            old_value: 旧字符串值
+            new_value: 新字符串值
+            
+        Returns:
+            str: 增量部分
+        """
+        # 使用性能优化器的字符串增量计算
+        return self.performance_optimizer.calculate_string_delta(old_value, new_value)
     
     def _is_value_partial(self, value: Any) -> bool:
         """判断值是否为部分值 - 优化的部分值判断
@@ -1168,6 +1860,44 @@ class StreamingParser:
         
         # 对于其他类型，直接返回新值作为增量
         return new_value
+    
+    def _should_process_path(self, path: str) -> bool:
+        """判断是否应该处理某个路径
+        
+        考虑字段过滤设置，判断当前路径或其子路径是否可能被包含在输出中。
+        这是一个优化方法，避免处理肯定不会输出的路径分支。
+        
+        Args:
+            path: 要检查的路径
+            
+        Returns:
+            bool: 是否应该处理该路径
+        """
+        if not self.field_filter.enabled:
+            return True
+        
+        # 如果当前路径本身应该被包含，则处理
+        if self.field_filter.should_include_path(path):
+            return True
+        
+        # 检查是否有子路径可能被包含
+        if self.field_filter.mode == "include":
+            # include模式：检查是否有包含路径以当前路径为前缀
+            for include_path in self.field_filter.include_paths:
+                if include_path.startswith(path + ".") or include_path.startswith(path + "["):
+                    return True
+                # 检查字段名匹配的情况
+                if "." + include_path in path or "[" + include_path + "]" in path:
+                    return True
+        elif self.field_filter.mode == "exclude":
+            # exclude模式：只要不是被明确排除的路径，就可能需要处理
+            # 检查当前路径是否是被排除路径的前缀
+            for exclude_path in self.field_filter.exclude_paths:
+                if path.endswith("." + exclude_path) or path.endswith("[" + exclude_path + "]"):
+                    return False
+            return True
+        
+        return True
     
     def _should_mark_field_complete(self, path: str, value: Any, state: ParsingState) -> bool:
         """判断字段是否应该标记为完成 - 优化的完成判断逻辑
@@ -1258,6 +1988,10 @@ class StreamingParser:
         remaining_paths = all_paths - state.completed_fields
         
         for path in remaining_paths:
+            # 检查字段过滤器，只为应该包含的路径生成done事件
+            if self.field_filter and not self.field_filter.should_include_path(path):
+                continue
+                
             success, value = self.path_builder.get_value_at_path(state.current_data, path)
             if success:
                 path_hash = state.calculate_path_hash(path, value)
@@ -1308,6 +2042,9 @@ class StreamingParser:
         if self.schema_validator and state.validation_context:
             # 清理验证上下文（如果有相关方法）
             pass
+        
+        # 从内存管理器注销会话
+        self.memory_manager.unregister_session(session_id)
         
         # 更新统计
         self.stats["active_sessions"] -= 1
@@ -1389,8 +2126,17 @@ class StreamingParser:
         """
         state = self.parsing_states.get(session_id)
         if state:
-            # 添加is_complete属性
-            state.is_complete = len(state.errors) == 0 and state.processed_chunks > 0
+            # 添加is_complete属性 - 改进的完成状态判断逻辑
+            # 1. 没有错误
+            # 2. 已处理至少一个块
+            # 3. 当前数据不为空（表示成功解析了数据）
+            # 4. 没有解析错误
+            state.is_complete = (
+                len(state.errors) == 0 and 
+                state.processed_chunks > 0 and 
+                bool(state.current_data) and
+                len(state.parsing_errors) == 0
+            )
         return state
     
     def has_session(self, session_id: str) -> bool:
@@ -1436,6 +2182,9 @@ class StreamingParser:
             session_id: 会话ID
         """
         if session_id in self.parsing_states:
+            # 从内存管理器注销会话
+            self.memory_manager.unregister_session(session_id)
+            
             del self.parsing_states[session_id]
             if self.stats["active_sessions"] > 0:
                 self.stats["active_sessions"] -= 1
@@ -1527,7 +2276,8 @@ class StreamingParser:
 async def parse_json_stream(
     stream: AsyncGenerator[str, None],
     enable_completion: bool = True,
-    completion_strategy: CompletionStrategy = CompletionStrategy.SMART
+    completion_strategy: CompletionStrategy = CompletionStrategy.SMART,
+    field_filter: Optional[FieldFilter] = None
 ) -> AsyncGenerator[StreamingEvent, None]:
     """解析JSON流的便捷函数
     
@@ -1535,13 +2285,76 @@ async def parse_json_stream(
         stream: 异步数据流
         enable_completion: 是否启用补全
         completion_strategy: 补全策略
+        field_filter: 字段过滤器配置
         
     Yields:
         StreamingEvent: 流式事件
     """
     parser = StreamingParser(
         enable_completion=enable_completion,
-        completion_strategy=completion_strategy
+        completion_strategy=completion_strategy,
+        field_filter=field_filter
+    )
+    
+    async for event in parser.parse_stream(stream):
+        yield event
+
+
+async def parse_json_stream_with_fields(
+    stream: AsyncGenerator[str, None],
+    include_fields: Optional[List[str]] = None,
+    exclude_fields: Optional[List[str]] = None,
+    exact_match: bool = False,
+    enable_completion: bool = True,
+    completion_strategy: CompletionStrategy = CompletionStrategy.SMART
+) -> AsyncGenerator[StreamingEvent, None]:
+    """解析JSON流并只输出指定字段的便捷函数
+    
+    Args:
+        stream: 异步数据流
+        include_fields: 要包含的字段列表（如 ['description', 'user.name']）
+        exclude_fields: 要排除的字段列表
+        exact_match: 是否精确匹配字段路径
+        enable_completion: 是否启用补全
+        completion_strategy: 补全策略
+        
+    Yields:
+        StreamingEvent: 流式事件
+        
+    Examples:
+        # 只输出description字段
+        async for event in parse_json_stream_with_fields(stream, include_fields=['description']):
+            print(f"{event.path}: {event.data}")
+            
+        # 排除敏感字段
+        async for event in parse_json_stream_with_fields(stream, exclude_fields=['password', 'token']):
+            print(f"{event.path}: {event.data}")
+    """
+    # 创建字段过滤器
+    # 确定过滤模式：如果有include_fields则使用include模式，否则使用exclude模式
+    if include_fields:
+        mode = "include"
+        filter_paths = include_fields
+    elif exclude_fields:
+        mode = "exclude"
+        filter_paths = exclude_fields
+    else:
+        # 如果两者都没有，则不启用过滤
+        field_filter = FieldFilter(enabled=False)
+    
+    if include_fields or exclude_fields:
+        field_filter = FieldFilter(
+            enabled=True,
+            include_paths=include_fields if mode == "include" else [],
+            exclude_paths=exclude_fields if mode == "exclude" else [],
+            mode=mode,
+            exact_match=exact_match
+        )
+    
+    parser = StreamingParser(
+        enable_completion=enable_completion,
+        completion_strategy=completion_strategy,
+        field_filter=field_filter
     )
     
     async for event in parser.parse_stream(stream):
